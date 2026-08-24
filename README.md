@@ -22,15 +22,16 @@ O token deve ser fornecido pelo gerenciador de segredos do CI/CD em produção. 
 
 ## Uso
 
-Edite `terraform/environments/dev/terraform.tfvars` e então execute:
+Autentique a CLI no HCP Terraform e então execute:
 
 ```sh
-terraform -chdir=terraform init -backend-config=environments/dev/backend.hcl
+terraform login
+terraform -chdir=terraform init
 terraform -chdir=terraform plan -var-file=environments/dev/terraform.tfvars
 terraform -chdir=terraform apply -var-file=environments/dev/terraform.tfvars
 ```
 
-Copie `backend.hcl.example` para `backend.hcl` e informe o backend remoto aprovado pela organização. O estado local é apenas uma conveniência de desenvolvimento; nunca faça commit de `*.tfstate`. Troque `dev` por `staging` ou `prod` para os demais ambientes.
+O estado é armazenado e bloqueado no HCP Terraform, organização `0xHackerSpace`, projeto `config`, workspace `wrapper-api`. Nunca faça commit de `*.tfstate`. Troque `dev` por `staging` ou `prod` para selecionar valores, mas não use ambientes diferentes simultaneamente na mesma workspace: uma workspace possui um único state. Para isolá-los, crie workspaces por ambiente e altere a seleção no bloco `cloud`.
 
 ## Adicionar um Worker
 
@@ -47,12 +48,12 @@ Crie um módulo focado em `terraform/modules/`, exponha entradas e saídas míni
 
 ## Novo ambiente
 
-Copie um diretório existente em `terraform/environments/`, preencha seus valores e configure um backend remoto distinto. Não copie módulos nem o root module. Veja [ADR 0001](docs/decisions/0001-environment-roots.md).
+Copie um diretório existente em `terraform/environments/` e preencha seus valores. Não copie módulos nem o root module. Para ter state isolado, crie uma workspace HCP para o novo ambiente e atualize a seleção no bloco `cloud`. Veja [ADR 0001](docs/decisions/0001-environment-roots.md).
 
 ## Validação
 
 ```sh
 terraform -chdir=terraform fmt -recursive
-terraform -chdir=terraform init -backend=false
+terraform -chdir=terraform init
 terraform -chdir=terraform validate
 ```

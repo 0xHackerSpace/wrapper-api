@@ -3,4 +3,3 @@
 *.tfstate.*
 *.tfvars.local
 crash.log
-backend.hcl

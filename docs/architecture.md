@@ -10,7 +10,7 @@ Terraform root module
 workers/**/*.mjs ── código ES Modules carregado por Terraform ──┘
 ```
 
-Cada ambiente seleciona uma única composição por meio de `terraform.tfvars`. O root module cria primeiro os recursos de plataforma e constrói os bindings a partir de seus outputs. Assim, um Worker não precisa conhecer IDs de infraestrutura no código nem no `tfvars`.
+O state e o locking são gerenciados pelo HCP Terraform na organização `0xHackerSpace`, projeto `config` e workspace `wrapper-api`. Cada ambiente seleciona uma composição por meio de `terraform.tfvars`; como uma workspace possui um único state, esta workspace deve gerenciar somente um ambiente de cada vez. O root module cria primeiro os recursos de plataforma e constrói os bindings a partir de seus outputs. Assim, um Worker não precisa conhecer IDs de infraestrutura no código nem no `tfvars`.
 
 O módulo `worker` publica um `cloudflare_workers_script` em sintaxe de módulos (`main_module`) e, opcionalmente, `cloudflare_workers_route`. Ele recebe apenas um caminho de arquivo `.mjs`; todo código permanece fora de HCL. O recurso `cloudflare_workers_script` é o recurso estável atual do provider v5 para upload de script; a evolução para os recursos beta versionados será uma troca localizada no módulo.
 
