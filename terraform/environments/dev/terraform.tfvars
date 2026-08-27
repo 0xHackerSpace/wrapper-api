@@ -8,3 +8,10 @@ workers = {
     compatibility_date = "2026-08-24"
   }
 }
+
+rag_stacks = {
+  rag = {
+    script_path        = "workers/rag/index.mjs"
+    compatibility_date = "2026-08-24"
+  }
+}
