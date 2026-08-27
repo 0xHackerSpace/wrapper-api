@@ -12,3 +12,12 @@ output "resource_ids" {
     q  = { for key, resource in module.queues : key => resource.id }
   }
 }
+
+output "rag_stacks" {
+  description = "Worker, bucket and index of each retrieval-augmented generation stack, by logical key."
+  value = { for key, stack in module.rag : key => {
+    worker = stack.script_name
+    bucket = stack.bucket_name
+    index  = stack.index_name
+  } }
+}

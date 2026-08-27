@@ -89,3 +89,32 @@ variable "workers" {
   default  = {}
   nullable = false
 }
+
+variable "rag_stacks" {
+  description = "Retrieval-augmented generation stacks keyed by a stable logical name. Each stack owns a Worker, an R2 bucket and a Vectorize index."
+  type = map(object({
+    script_path          = string
+    compatibility_date   = string
+    name                 = optional(string)
+    bucket_name          = optional(string)
+    bucket_location      = optional(string)
+    bucket_jurisdiction  = optional(string)
+    bucket_storage_class = optional(string)
+    index_name           = optional(string)
+    embedding_model      = optional(string)
+    generation_model     = optional(string)
+    embedding_dimensions = optional(number)
+    vector_metric        = optional(string)
+    chunk_size           = optional(number)
+    chunk_overlap        = optional(number)
+    top_k                = optional(number)
+    metadata_indexes     = optional(map(string), { documentId = "string", source = "string" })
+    routes = optional(list(object({
+      zone_id = string
+      pattern = string
+    })), [])
+    additional_bindings = optional(list(map(string)), [])
+  }))
+  default  = {}
+  nullable = false
+}

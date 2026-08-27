@@ -42,6 +42,25 @@ O estado é armazenado e bloqueado no HCP Terraform, organização `0xHackerSpac
 
 O módulo valida a extensão `.mjs` e envia o conteúdo usando `file()`: não há JavaScript inline em Terraform.
 
+## RAG na Cloudflare
+
+O módulo `terraform/modules/rag` compõe `r2`, `vectorize` e `worker` em uma stack de retrieval-augmented generation: bucket para documentos originais, índice Vectorize para embeddings e um Worker com `GET /health`, `POST /ingest` e `POST /query`. Declare a stack em `rag_stacks` no `terraform.tfvars` do ambiente:
+
+```hcl
+rag_stacks = {
+  rag = {
+    script_path        = "workers/rag/index.mjs"
+    compatibility_date = "2026-08-24"
+  }
+}
+```
+
+O Worker recebe índice, bucket, modelos e parâmetros de recuperação por bindings (`AI`, `VECTORIZE`, `DOCUMENTS` e `plain_text`), então `workers/rag/index.mjs` não conhece nomes físicos, IDs ou credenciais. O modelo de embedding padrão `@cf/google/embeddinggemma-300m` gera 768 dimensões, valor padrão de `embedding_dimensions`; alterar um exige alterar o outro, o que recria o índice e pede reindexação a partir do R2.
+
+O índice Vectorize é criado pela API da Cloudflare com `terraform_data`, porque o provider 5.23.0 não tem recurso equivalente. O apply precisa de `curl` e de `CLOUDFLARE_API_TOKEN` com permissão `Vectorize Write`. Veja [ADR 0003](docs/decisions/0003-vectorize-api-provisioning.md).
+
+`/ingest` e `/query` só exigem `Authorization: Bearer <token>` quando um binding `AUTH_TOKEN` está presente; forneça-o por `additional_bindings` a partir de uma fonte segura, nunca de um `.tfvars` versionado.
+
 ## Adicionar um recurso Cloudflare
 
 Crie um módulo focado em `terraform/modules/`, exponha entradas e saídas mínimas, acrescente sua coleção tipada em `terraform/variables.tf`, componha-a em `terraform/main.tf` e faça referência por binding quando aplicável. Mantenha políticas de WAF, Access e Zero Trust em módulos próprios, em vez de misturá-las ao deployment de um Worker.
@@ -56,4 +75,7 @@ Copie um diretório existente em `terraform/environments/` e preencha seus valor
 terraform -chdir=terraform fmt -recursive
 terraform -chdir=terraform init
 terraform -chdir=terraform validate
+node --test 'tests/**/*.test.mjs'
 ```
+
+Os testes usam o runner embutido do Node.js, sem dependências, e exercitam os Workers com bindings simulados.
