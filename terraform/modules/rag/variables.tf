@@ -160,6 +160,17 @@ variable "routes" {
   nullable = false
 }
 
+variable "domains" {
+  description = "Custom domains routed to the RAG Worker."
+  type = list(object({
+    hostname  = string
+    zone_id   = optional(string)
+    zone_name = optional(string)
+  }))
+  default  = []
+  nullable = false
+}
+
 variable "additional_bindings" {
   description = "Extra Worker bindings, such as an AUTH_TOKEN secret added outside of version control."
   type        = list(map(string))

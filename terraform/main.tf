@@ -45,4 +45,5 @@ module "worker" {
   compatibility_date = each.value.compatibility_date
   bindings           = local.worker_bindings[each.key]
   routes             = each.value.routes
+  domains            = each.value.domains
 }

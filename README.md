@@ -38,7 +38,8 @@ O estado é armazenado e bloqueado no HCP Terraform, organização `0xHackerSpac
 1. Crie o código em `workers/<nome>/index.mjs`, usando ES Modules e `export default`.
 2. Adicione uma entrada em `workers` no `terraform.tfvars` do ambiente, apontando `script_path` para o `.mjs`.
 3. Se necessário, declare o recurso em `kv_namespaces`, `r2_buckets`, `d1_databases` ou `queues` e cite-o em `bindings` pelo `resource_key`.
-4. Execute `fmt`, `validate`, `plan` e `apply`.
+4. Para expor o Worker em um domínio, declare `domains`; para um padrão com caminho, use `routes`.
+5. Execute `fmt`, `validate`, `plan` e `apply`.
 
 O módulo valida a extensão `.mjs` e envia o conteúdo usando `file()`: não há JavaScript inline em Terraform.
 
@@ -60,6 +61,29 @@ O Worker recebe índice, bucket, modelos e parâmetros de recuperação por bind
 O índice Vectorize é criado pela API da Cloudflare com `terraform_data`, porque o provider 5.23.0 não tem recurso equivalente. O apply precisa de `curl` e de `CLOUDFLARE_API_TOKEN` com permissão `Vectorize Write`. Veja [ADR 0003](docs/decisions/0003-vectorize-api-provisioning.md).
 
 `/ingest` e `/query` só exigem `Authorization: Bearer <token>` quando um binding `AUTH_TOKEN` está presente; forneça-o por `additional_bindings` a partir de uma fonte segura, nunca de um `.tfvars` versionado.
+
+## Expor um Worker em um domínio
+
+`domains` associa um hostname ao Worker com `cloudflare_workers_custom_domain`. A Cloudflare cria o registro DNS e emite o certificado, então não é preciso declarar nada em `dns_records`. O hostname deve ser o apex da zona ou um subdomínio dela, e a zona precisa estar na mesma conta:
+
+```hcl
+rag_stacks = {
+  rag = {
+    script_path        = "workers/rag/index.mjs"
+    compatibility_date = "2026-08-24"
+    domains = [{
+      hostname = "rag.exemplo.com"
+      zone_id  = "<zone id>"
+    }]
+  }
+}
+```
+
+O mesmo atributo existe em `workers`. Depois do apply, `https://rag.exemplo.com/health` responde pelo Worker.
+
+Use `routes` quando o gatilho for um padrão com caminho (`exemplo.com/rag/*`) ou quando o hostname já tiver um registro DNS administrado em outro lugar. Rotas só funcionam se existir um registro DNS proxied para o hostname; um domínio customizado dispensa esse passo. Os dois podem coexistir no mesmo Worker.
+
+O token precisa de `Workers Scripts Write` e, para rotas, `Workers Routes Edit`.
 
 ## Adicionar um recurso Cloudflare
 

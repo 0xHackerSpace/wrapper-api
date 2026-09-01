@@ -50,3 +50,22 @@ variable "routes" {
   default  = []
   nullable = false
 }
+
+variable "domains" {
+  description = "Custom domains routed to this Worker. Cloudflare creates the DNS record and the certificate for each hostname."
+  type = list(object({
+    hostname  = string
+    zone_id   = optional(string)
+    zone_name = optional(string)
+  }))
+  default  = []
+  nullable = false
+  validation {
+    condition     = alltrue([for domain in var.domains : domain.zone_id != null || domain.zone_name != null])
+    error_message = "each domain must set zone_id or zone_name so Cloudflare can resolve the zone."
+  }
+  validation {
+    condition     = alltrue([for domain in var.domains : can(regex("^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$", domain.hostname))])
+    error_message = "hostname must be a lowercase domain name, either the zone apex or a subdomain of it."
+  }
+}

@@ -27,5 +27,6 @@ module "rag" {
   top_k                = each.value.top_k
   metadata_indexes     = each.value.metadata_indexes
   routes               = each.value.routes
+  domains              = each.value.domains
   additional_bindings  = each.value.additional_bindings
 }

@@ -14,3 +14,13 @@ resource "cloudflare_workers_route" "this" {
   pattern = each.value.pattern
   script  = cloudflare_workers_script.this.id
 }
+
+resource "cloudflare_workers_custom_domain" "this" {
+  for_each = { for domain in var.domains : domain.hostname => domain }
+
+  account_id = var.account_id
+  hostname   = each.value.hostname
+  service    = cloudflare_workers_script.this.script_name
+  zone_id    = each.value.zone_id
+  zone_name  = each.value.zone_name
+}

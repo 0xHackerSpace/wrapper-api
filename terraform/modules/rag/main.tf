@@ -75,4 +75,5 @@ module "worker" {
   compatibility_date = var.compatibility_date
   bindings           = local.bindings
   routes             = var.routes
+  domains            = var.domains
 }

@@ -79,6 +79,11 @@ variable "workers" {
       zone_id = string
       pattern = string
     })), [])
+    domains = optional(list(object({
+      hostname  = string
+      zone_id   = optional(string)
+      zone_name = optional(string)
+    })), [])
     bindings = optional(list(object({
       name         = string
       type         = string
@@ -112,6 +117,11 @@ variable "rag_stacks" {
     routes = optional(list(object({
       zone_id = string
       pattern = string
+    })), [])
+    domains = optional(list(object({
+      hostname  = string
+      zone_id   = optional(string)
+      zone_name = optional(string)
     })), [])
     additional_bindings = optional(list(map(string)), [])
   }))

@@ -3,6 +3,11 @@ output "worker_names" {
   value       = { for key, worker in module.worker : key => worker.script_name }
 }
 
+output "worker_domains" {
+  description = "Custom domains routed to each Worker, by logical key."
+  value       = { for key, worker in module.worker : key => worker.domains }
+}
+
 output "resource_ids" {
   description = "Provisioned resource IDs, keyed by logical name."
   value = {
@@ -16,8 +21,9 @@ output "resource_ids" {
 output "rag_stacks" {
   description = "Worker, bucket and index of each retrieval-augmented generation stack, by logical key."
   value = { for key, stack in module.rag : key => {
-    worker = stack.script_name
-    bucket = stack.bucket_name
-    index  = stack.index_name
+    worker  = stack.script_name
+    bucket  = stack.bucket_name
+    index   = stack.index_name
+    domains = stack.domains
   } }
 }

@@ -8,6 +8,11 @@ output "script_name" {
   value       = module.worker.script_name
 }
 
+output "domains" {
+  description = "Custom domain hostnames routed to the RAG Worker."
+  value       = module.worker.domains
+}
+
 output "bucket_name" {
   description = "R2 bucket holding the source documents."
   value       = module.documents.name
