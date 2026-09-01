@@ -25,5 +25,7 @@ output "rag_stacks" {
     bucket  = stack.bucket_name
     index   = stack.index_name
     domains = stack.domains
+
+    subdomain_enabled = stack.subdomain_enabled
   } }
 }

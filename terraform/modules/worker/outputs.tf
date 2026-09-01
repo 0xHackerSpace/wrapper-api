@@ -12,3 +12,8 @@ output "domains" {
   description = "Custom domain hostnames routed to this Worker."
   value       = [for domain in cloudflare_workers_custom_domain.this : domain.hostname]
 }
+
+output "subdomain_enabled" {
+  description = "Whether Terraform publishes this Worker on workers.dev. Null when the setting is unmanaged."
+  value       = one(cloudflare_workers_script_subdomain.this[*].enabled)
+}

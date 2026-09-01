@@ -46,4 +46,7 @@ module "worker" {
   bindings           = local.worker_bindings[each.key]
   routes             = each.value.routes
   domains            = each.value.domains
+
+  subdomain_enabled          = each.value.subdomain_enabled
+  subdomain_previews_enabled = each.value.subdomain_previews_enabled
 }

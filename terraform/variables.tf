@@ -84,6 +84,8 @@ variable "workers" {
       zone_id   = optional(string)
       zone_name = optional(string)
     })), [])
+    subdomain_enabled          = optional(bool)
+    subdomain_previews_enabled = optional(bool)
     bindings = optional(list(object({
       name         = string
       type         = string
@@ -123,7 +125,9 @@ variable "rag_stacks" {
       zone_id   = optional(string)
       zone_name = optional(string)
     })), [])
-    additional_bindings = optional(list(map(string)), [])
+    subdomain_enabled          = optional(bool)
+    subdomain_previews_enabled = optional(bool)
+    additional_bindings        = optional(list(map(string)), [])
   }))
   default  = {}
   nullable = false

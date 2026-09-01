@@ -38,7 +38,7 @@ O estado é armazenado e bloqueado no HCP Terraform, organização `0xHackerSpac
 1. Crie o código em `workers/<nome>/index.mjs`, usando ES Modules e `export default`.
 2. Adicione uma entrada em `workers` no `terraform.tfvars` do ambiente, apontando `script_path` para o `.mjs`.
 3. Se necessário, declare o recurso em `kv_namespaces`, `r2_buckets`, `d1_databases` ou `queues` e cite-o em `bindings` pelo `resource_key`.
-4. Para expor o Worker em um domínio, declare `domains`; para um padrão com caminho, use `routes`.
+4. Para expor o Worker, use `subdomain_enabled` (workers.dev), `domains` (domínio próprio) ou `routes` (padrão com caminho).
 5. Execute `fmt`, `validate`, `plan` e `apply`.
 
 O módulo valida a extensão `.mjs` e envia o conteúdo usando `file()`: não há JavaScript inline em Terraform.
@@ -64,7 +64,21 @@ O índice Vectorize é criado pela API da Cloudflare com `terraform_data`, porqu
 
 ## Expor um Worker em um domínio
 
-`domains` associa um hostname ao Worker com `cloudflare_workers_custom_domain`. A Cloudflare cria o registro DNS e emite o certificado, então não é preciso declarar nada em `dns_records`. O hostname deve ser o apex da zona ou um subdomínio dela, e a zona precisa estar na mesma conta:
+O caminho mais curto é `subdomain_enabled = true`, que publica o Worker em `https://<script>.<conta>.workers.dev` sem precisar de zona nem de registro DNS:
+
+```hcl
+rag_stacks = {
+  rag = {
+    script_path        = "workers/rag/index.mjs"
+    compatibility_date = "2026-08-24"
+    subdomain_enabled  = true
+  }
+}
+```
+
+`<conta>` é o subdomínio workers.dev da conta, escolhido uma única vez no dashboard da Cloudflare; por isso o Terraform expõe apenas o estado do subdomínio, não a URL completa. `subdomain_previews_enabled` faz o mesmo para as URLs de preview de cada versão. Deixar os dois de fora mantém a configuração como está na conta, sem administração pelo Terraform.
+
+Para um domínio próprio, `domains` associa um hostname ao Worker com `cloudflare_workers_custom_domain`. A Cloudflare cria o registro DNS e emite o certificado, então não é preciso declarar nada em `dns_records`. O hostname deve ser o apex da zona ou um subdomínio dela, e a zona precisa estar na mesma conta:
 
 ```hcl
 rag_stacks = {

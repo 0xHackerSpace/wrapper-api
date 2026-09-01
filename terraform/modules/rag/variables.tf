@@ -171,6 +171,18 @@ variable "domains" {
   nullable = false
 }
 
+variable "subdomain_enabled" {
+  description = "Whether the RAG Worker answers on <name>.<account>.workers.dev. Null leaves the setting unmanaged."
+  type        = bool
+  default     = null
+}
+
+variable "subdomain_previews_enabled" {
+  description = "Whether version preview URLs are served on workers.dev. Only read when subdomain_enabled is set."
+  type        = bool
+  default     = null
+}
+
 variable "additional_bindings" {
   description = "Extra Worker bindings, such as an AUTH_TOKEN secret added outside of version control."
   type        = list(map(string))

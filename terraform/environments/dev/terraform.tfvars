@@ -13,6 +13,7 @@ rag_stacks = {
   rag = {
     script_path        = "workers/rag/index.mjs"
     compatibility_date = "2026-08-24"
+    subdomain_enabled  = true
 
     # Fill zone_id and hostname to expose the Worker on a domain of this account.
     # domains = [{

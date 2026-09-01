@@ -5,8 +5,11 @@ embeddings and a Worker that exposes `GET /health`, `POST /ingest` and `POST /qu
 `vectorize` and `worker` modules instead of declaring resources of its own.
 
 Inputs: `account_id`, `environment`, `name`, `script_path`, `compatibility_date` and optional bucket, index,
-model, retrieval, `routes` and `domains` settings. Outputs: `id`, `script_name`, `domains`, `bucket_name`,
-`index_name`, `configuration`.
+model, retrieval, `routes`, `domains` and `subdomain_enabled` settings. Outputs: `id`, `script_name`,
+`domains`, `subdomain_enabled`, `bucket_name`, `index_name`, `configuration`.
+
+`subdomain_enabled` publishes the Worker on `https://<name>.<account>.workers.dev`, which is enough to reach
+the endpoints without owning a zone.
 
 `domains` attaches hostnames to the Worker through `cloudflare_workers_custom_domain`, which also creates the
 DNS record and the certificate. The endpoints then answer on `https://<hostname>/health`, `/ingest` and
@@ -39,6 +42,8 @@ module "rag" {
   name               = "dev-rag"
   script_path        = abspath("${path.root}/../workers/rag/index.mjs")
   compatibility_date = "2026-08-24"
+
+  subdomain_enabled = true
 
   domains = [{
     hostname = "rag.example.com"

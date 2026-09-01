@@ -24,3 +24,12 @@ resource "cloudflare_workers_custom_domain" "this" {
   zone_id    = each.value.zone_id
   zone_name  = each.value.zone_name
 }
+
+resource "cloudflare_workers_script_subdomain" "this" {
+  count = var.subdomain_enabled == null ? 0 : 1
+
+  account_id       = var.account_id
+  script_name      = cloudflare_workers_script.this.script_name
+  enabled          = var.subdomain_enabled
+  previews_enabled = var.subdomain_previews_enabled
+}

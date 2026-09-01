@@ -29,4 +29,7 @@ module "rag" {
   routes               = each.value.routes
   domains              = each.value.domains
   additional_bindings  = each.value.additional_bindings
+
+  subdomain_enabled          = each.value.subdomain_enabled
+  subdomain_previews_enabled = each.value.subdomain_previews_enabled
 }

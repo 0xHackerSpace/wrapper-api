@@ -69,3 +69,15 @@ variable "domains" {
     error_message = "hostname must be a lowercase domain name, either the zone apex or a subdomain of it."
   }
 }
+
+variable "subdomain_enabled" {
+  description = "Whether the Worker answers on <script_name>.<account>.workers.dev. Null leaves the setting unmanaged."
+  type        = bool
+  default     = null
+}
+
+variable "subdomain_previews_enabled" {
+  description = "Whether version preview URLs are served on workers.dev. Only read when subdomain_enabled is set."
+  type        = bool
+  default     = null
+}

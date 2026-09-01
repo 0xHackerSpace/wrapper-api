@@ -13,6 +13,11 @@ output "domains" {
   value       = module.worker.domains
 }
 
+output "subdomain_enabled" {
+  description = "Whether Terraform publishes the RAG Worker on workers.dev."
+  value       = module.worker.subdomain_enabled
+}
+
 output "bucket_name" {
   description = "R2 bucket holding the source documents."
   value       = module.documents.name
