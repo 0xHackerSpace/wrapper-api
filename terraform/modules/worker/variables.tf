@@ -41,6 +41,13 @@ variable "bindings" {
   nullable    = false
 }
 
+variable "keep_bindings" {
+  description = "Binding types preserved from the previous upload, for bindings created outside Terraform such as secrets."
+  type        = set(string)
+  default     = []
+  nullable    = false
+}
+
 variable "routes" {
   description = "Zone routes that invoke this Worker."
   type = list(object({

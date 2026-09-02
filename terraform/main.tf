@@ -44,6 +44,7 @@ module "worker" {
   script_path        = local.worker_script_paths[each.key]
   compatibility_date = each.value.compatibility_date
   bindings           = local.worker_bindings[each.key]
+  keep_bindings      = each.value.keep_bindings
   routes             = each.value.routes
   domains            = each.value.domains
 

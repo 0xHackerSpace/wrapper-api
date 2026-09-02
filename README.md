@@ -43,6 +43,49 @@ O estado é armazenado e bloqueado no HCP Terraform, organização `0xHackerSpac
 
 O módulo valida a extensão `.mjs` e envia o conteúdo usando `file()`: não há JavaScript inline em Terraform.
 
+## Worker `auth`
+
+`workers/auth/index.mjs` autentica clientes e autoriza chamadas. Endpoints:
+
+| Endpoint | Função |
+| --- | --- |
+| `GET /health` | disponibilidade, emissor e bindings presentes |
+| `POST /token` | autentica um cliente por client credentials (JSON ou HTTP Basic) e emite um JWT HS256 com os escopos dele |
+| `POST /introspect` | valida um token e responde se ele está ativo e se cobre o escopo exigido |
+
+`/token` aceita `{"client_id": "...", "client_secret": "...", "scope": "rag:query"}` e devolve `{"access_token", "token_type", "expires_in", "scope"}`. O `scope` pedido precisa ser um subconjunto dos escopos do cliente; pedir mais devolve `403 invalid_scope`. Cliente inexistente e segredo errado produzem a mesma resposta `401 invalid_client`, e a comparação roda nos dois casos para não vazar a existência do cliente pelo tempo de resposta.
+
+`/introspect` recebe `{"token": "...", "scope": "rag:ingest"}` e responde `{"active", "authorized", "missingScopes", "subject", "scopes", "expiresAt"}`. É o endpoint que outros Workers chamam para autorizar uma requisição. Ele fica aberto por padrão e passa a exigir `Authorization: Bearer <token>` quando o binding `AUTH_TOKEN` existe, o mesmo mecanismo opcional do Worker de RAG.
+
+### Chave de assinatura
+
+`SIGNING_KEY` é um `secret_text` de no mínimo 32 caracteres e **não** entra em `.tfvars`. Defina-o fora do Terraform e mantenha `keep_bindings = ["secret_text"]` no Worker, que preserva o binding a cada upload de script:
+
+```sh
+openssl rand -base64 48 | npx wrangler secret put SIGNING_KEY --name dev-auth
+```
+
+Sem esse binding o Worker responde `500` em todas as rotas, inclusive `/health`, de propósito.
+
+### Cadastro de clientes
+
+Cada cliente é uma chave `client:<client_id>` no namespace KV `auth_clients`, com este valor:
+
+```json
+{
+  "secretHash": "<sha-256 hex do client_secret>",
+  "scopes": ["rag:query", "rag:ingest"],
+  "disabled": false
+}
+```
+
+Gere o segredo e o hash com entropia alta, guardando apenas o hash:
+
+```sh
+secret=$(openssl rand -hex 32)
+printf '%s' "$secret" | sha256sum
+```
+
 ## RAG na Cloudflare
 
 O módulo `terraform/modules/rag` compõe `r2`, `vectorize` e `worker` em uma stack de retrieval-augmented generation: bucket para documentos originais, índice Vectorize para embeddings e um Worker com `GET /health`, `POST /ingest` e `POST /query`. Declare a stack em `rag_stacks` no `terraform.tfvars` do ambiente:

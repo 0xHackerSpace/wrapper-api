@@ -171,6 +171,13 @@ variable "domains" {
   nullable = false
 }
 
+variable "keep_bindings" {
+  description = "Binding types preserved from the previous upload, for bindings created outside Terraform such as an AUTH_TOKEN secret."
+  type        = set(string)
+  default     = []
+  nullable    = false
+}
+
 variable "subdomain_enabled" {
   description = "Whether the RAG Worker answers on <name>.<account>.workers.dev. Null leaves the setting unmanaged."
   type        = bool

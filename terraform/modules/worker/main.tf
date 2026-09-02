@@ -5,6 +5,7 @@ resource "cloudflare_workers_script" "this" {
   main_module        = basename(var.script_path)
   compatibility_date = var.compatibility_date
   bindings           = var.bindings
+  keep_bindings      = length(var.keep_bindings) > 0 ? var.keep_bindings : null
 }
 
 resource "cloudflare_workers_route" "this" {

@@ -74,6 +74,7 @@ module "worker" {
   script_path        = var.script_path
   compatibility_date = var.compatibility_date
   bindings           = local.bindings
+  keep_bindings      = var.keep_bindings
   routes             = var.routes
   domains            = var.domains
 
