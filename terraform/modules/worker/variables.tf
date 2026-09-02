@@ -41,6 +41,13 @@ variable "bindings" {
   nullable    = false
 }
 
+variable "keep_bindings" {
+  description = "Binding types preserved from the previous upload, for bindings created outside Terraform such as secrets."
+  type        = set(string)
+  default     = []
+  nullable    = false
+}
+
 variable "routes" {
   description = "Zone routes that invoke this Worker."
   type = list(object({
@@ -49,4 +56,35 @@ variable "routes" {
   }))
   default  = []
   nullable = false
+}
+
+variable "domains" {
+  description = "Custom domains routed to this Worker. Cloudflare creates the DNS record and the certificate for each hostname."
+  type = list(object({
+    hostname  = string
+    zone_id   = optional(string)
+    zone_name = optional(string)
+  }))
+  default  = []
+  nullable = false
+  validation {
+    condition     = alltrue([for domain in var.domains : domain.zone_id != null || domain.zone_name != null])
+    error_message = "each domain must set zone_id or zone_name so Cloudflare can resolve the zone."
+  }
+  validation {
+    condition     = alltrue([for domain in var.domains : can(regex("^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$", domain.hostname))])
+    error_message = "hostname must be a lowercase domain name, either the zone apex or a subdomain of it."
+  }
+}
+
+variable "subdomain_enabled" {
+  description = "Whether the Worker answers on <script_name>.<account>.workers.dev. Null leaves the setting unmanaged."
+  type        = bool
+  default     = null
+}
+
+variable "subdomain_previews_enabled" {
+  description = "Whether version preview URLs are served on workers.dev. Only read when subdomain_enabled is set."
+  type        = bool
+  default     = null
 }

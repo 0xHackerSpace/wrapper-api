@@ -38,9 +38,53 @@ O estado é armazenado e bloqueado no HCP Terraform, organização `0xHackerSpac
 1. Crie o código em `workers/<nome>/index.mjs`, usando ES Modules e `export default`.
 2. Adicione uma entrada em `workers` no `terraform.tfvars` do ambiente, apontando `script_path` para o `.mjs`.
 3. Se necessário, declare o recurso em `kv_namespaces`, `r2_buckets`, `d1_databases` ou `queues` e cite-o em `bindings` pelo `resource_key`.
-4. Execute `fmt`, `validate`, `plan` e `apply`.
+4. Para expor o Worker, use `subdomain_enabled` (workers.dev), `domains` (domínio próprio) ou `routes` (padrão com caminho).
+5. Execute `fmt`, `validate`, `plan` e `apply`.
 
 O módulo valida a extensão `.mjs` e envia o conteúdo usando `file()`: não há JavaScript inline em Terraform.
+
+## Worker `auth`
+
+`workers/auth/index.mjs` autentica clientes e autoriza chamadas. As decisões estão na [ADR 0005](docs/decisions/0005-auth-worker.md). Endpoints:
+
+| Endpoint | Função |
+| --- | --- |
+| `GET /health` | disponibilidade, emissor e bindings presentes |
+| `POST /token` | autentica um cliente por client credentials (JSON ou HTTP Basic) e emite um JWT HS256 com os escopos dele |
+| `POST /introspect` | valida um token e responde se ele está ativo e se cobre o escopo exigido |
+
+`/token` aceita `{"client_id": "...", "client_secret": "...", "scope": "rag:query"}` e devolve `{"access_token", "token_type", "expires_in", "scope"}`. O `scope` pedido precisa ser um subconjunto dos escopos do cliente; pedir mais devolve `403 invalid_scope`. Cliente inexistente e segredo errado produzem a mesma resposta `401 invalid_client`, e a comparação roda nos dois casos para não vazar a existência do cliente pelo tempo de resposta.
+
+`/introspect` recebe `{"token": "...", "scope": "rag:ingest"}` e responde `{"active", "authorized", "missingScopes", "subject", "scopes", "expiresAt"}`. É o endpoint que outros Workers chamam para autorizar uma requisição. Ele fica aberto por padrão e passa a exigir `Authorization: Bearer <token>` quando o binding `AUTH_TOKEN` existe, o mesmo mecanismo opcional do Worker de RAG.
+
+### Chave de assinatura
+
+`SIGNING_KEY` é um `secret_text` de no mínimo 32 caracteres e **não** entra em `.tfvars`. Defina-o fora do Terraform e mantenha `keep_bindings = ["secret_text"]` no Worker, que preserva o binding a cada upload de script:
+
+```sh
+openssl rand -base64 48 | npx wrangler secret put SIGNING_KEY --name dev-auth
+```
+
+Sem esse binding o Worker responde `500` em todas as rotas, inclusive `/health`, de propósito. Veja [ADR 0006](docs/decisions/0006-worker-secrets.md).
+
+### Cadastro de clientes
+
+Cada cliente é uma chave `client:<client_id>` no namespace KV `auth_clients`, com este valor:
+
+```json
+{
+  "secretHash": "<sha-256 hex do client_secret>",
+  "scopes": ["rag:query", "rag:ingest"],
+  "disabled": false
+}
+```
+
+Gere o segredo e o hash com entropia alta, guardando apenas o hash:
+
+```sh
+secret=$(openssl rand -hex 32)
+printf '%s' "$secret" | sha256sum
+```
 
 ## RAG na Cloudflare
 
@@ -60,6 +104,43 @@ O Worker recebe índice, bucket, modelos e parâmetros de recuperação por bind
 O índice Vectorize é criado pela API da Cloudflare com `terraform_data`, porque o provider 5.23.0 não tem recurso equivalente. O apply precisa de `curl` e de `CLOUDFLARE_API_TOKEN` com permissão `Vectorize Write`. Veja [ADR 0003](docs/decisions/0003-vectorize-api-provisioning.md).
 
 `/ingest` e `/query` só exigem `Authorization: Bearer <token>` quando um binding `AUTH_TOKEN` está presente; forneça-o por `additional_bindings` a partir de uma fonte segura, nunca de um `.tfvars` versionado.
+
+## Expor um Worker em um domínio
+
+O caminho mais curto é `subdomain_enabled = true`, que publica o Worker em `https://<script>.<conta>.workers.dev` sem precisar de zona nem de registro DNS:
+
+```hcl
+rag_stacks = {
+  rag = {
+    script_path        = "workers/rag/index.mjs"
+    compatibility_date = "2026-08-24"
+    subdomain_enabled  = true
+  }
+}
+```
+
+`<conta>` é o subdomínio workers.dev da conta, escolhido uma única vez no dashboard da Cloudflare; por isso o Terraform expõe apenas o estado do subdomínio, não a URL completa. `subdomain_previews_enabled` faz o mesmo para as URLs de preview de cada versão. Deixar os dois de fora mantém a configuração como está na conta, sem administração pelo Terraform.
+
+Para um domínio próprio, `domains` associa um hostname ao Worker com `cloudflare_workers_custom_domain`. A Cloudflare cria o registro DNS e emite o certificado, então não é preciso declarar nada em `dns_records`. O hostname deve ser o apex da zona ou um subdomínio dela, e a zona precisa estar na mesma conta:
+
+```hcl
+rag_stacks = {
+  rag = {
+    script_path        = "workers/rag/index.mjs"
+    compatibility_date = "2026-08-24"
+    domains = [{
+      hostname = "rag.exemplo.com"
+      zone_id  = "<zone id>"
+    }]
+  }
+}
+```
+
+O mesmo atributo existe em `workers`. Depois do apply, `https://rag.exemplo.com/health` responde pelo Worker.
+
+A escolha entre os três gatilhos está na [ADR 0004](docs/decisions/0004-worker-triggers.md). Use `routes` quando o gatilho for um padrão com caminho (`exemplo.com/rag/*`) ou quando o hostname já tiver um registro DNS administrado em outro lugar. Rotas só funcionam se existir um registro DNS proxied para o hostname; um domínio customizado dispensa esse passo. Os dois podem coexistir no mesmo Worker.
+
+O token precisa de `Workers Scripts Write` e, para rotas, `Workers Routes Edit`.
 
 ## Adicionar um recurso Cloudflare
 

@@ -79,6 +79,14 @@ variable "workers" {
       zone_id = string
       pattern = string
     })), [])
+    domains = optional(list(object({
+      hostname  = string
+      zone_id   = optional(string)
+      zone_name = optional(string)
+    })), [])
+    keep_bindings              = optional(set(string), [])
+    subdomain_enabled          = optional(bool)
+    subdomain_previews_enabled = optional(bool)
     bindings = optional(list(object({
       name         = string
       type         = string
@@ -113,7 +121,15 @@ variable "rag_stacks" {
       zone_id = string
       pattern = string
     })), [])
-    additional_bindings = optional(list(map(string)), [])
+    domains = optional(list(object({
+      hostname  = string
+      zone_id   = optional(string)
+      zone_name = optional(string)
+    })), [])
+    keep_bindings              = optional(set(string), [])
+    subdomain_enabled          = optional(bool)
+    subdomain_previews_enabled = optional(bool)
+    additional_bindings        = optional(list(map(string)), [])
   }))
   default  = {}
   nullable = false
