@@ -18,4 +18,6 @@ Módulos iniciais: `worker`, `dns`, `kv`, `r2`, `d1` e `queues`. `waf` é um pon
 
 `vectorize` e `rag` seguem esse caminho. `vectorize` administra um índice Vectorize v2; como o provider ainda não possui recurso equivalente, ele usa `terraform_data` e a API da Cloudflare, conforme [ADR 0003](decisions/0003-vectorize-api-provisioning.md). `rag` compõe `r2`, `vectorize` e `worker` em uma stack de retrieval-augmented generation e entrega índice, bucket, modelos de Workers AI e parâmetros de recuperação ao Worker por bindings `ai`, `vectorize`, `r2_bucket` e `plain_text`.
 
-Os tokens e secrets não são inputs do projeto. Use `CLOUDFLARE_API_TOKEN` e, para bindings secretos futuros, uma fonte segura/CI; valores secretos jamais devem entrar em `.tfvars` versionado.
+Os Workers publicados recebem tráfego por três gatilhos opcionais do módulo `worker`: subdomínio workers.dev, domínio customizado e rota de zona ([ADR 0004](decisions/0004-worker-triggers.md)). O Worker `auth` centraliza emissão e verificação de tokens para os demais ([ADR 0005](decisions/0005-auth-worker.md)).
+
+Os tokens e secrets não são inputs do projeto. Use `CLOUDFLARE_API_TOKEN` e, para bindings secretos futuros, uma fonte segura/CI; valores secretos jamais devem entrar em `.tfvars` versionado. Bindings `secret_text` são definidos fora do Terraform e preservados entre uploads por `keep_bindings` ([ADR 0006](decisions/0006-worker-secrets.md)).

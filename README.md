@@ -45,7 +45,7 @@ O módulo valida a extensão `.mjs` e envia o conteúdo usando `file()`: não h�
 
 ## Worker `auth`
 
-`workers/auth/index.mjs` autentica clientes e autoriza chamadas. Endpoints:
+`workers/auth/index.mjs` autentica clientes e autoriza chamadas. As decisões estão na [ADR 0005](docs/decisions/0005-auth-worker.md). Endpoints:
 
 | Endpoint | Função |
 | --- | --- |
@@ -65,7 +65,7 @@ O módulo valida a extensão `.mjs` e envia o conteúdo usando `file()`: não h�
 openssl rand -base64 48 | npx wrangler secret put SIGNING_KEY --name dev-auth
 ```
 
-Sem esse binding o Worker responde `500` em todas as rotas, inclusive `/health`, de propósito.
+Sem esse binding o Worker responde `500` em todas as rotas, inclusive `/health`, de propósito. Veja [ADR 0006](docs/decisions/0006-worker-secrets.md).
 
 ### Cadastro de clientes
 
@@ -138,7 +138,7 @@ rag_stacks = {
 
 O mesmo atributo existe em `workers`. Depois do apply, `https://rag.exemplo.com/health` responde pelo Worker.
 
-Use `routes` quando o gatilho for um padrão com caminho (`exemplo.com/rag/*`) ou quando o hostname já tiver um registro DNS administrado em outro lugar. Rotas só funcionam se existir um registro DNS proxied para o hostname; um domínio customizado dispensa esse passo. Os dois podem coexistir no mesmo Worker.
+A escolha entre os três gatilhos está na [ADR 0004](docs/decisions/0004-worker-triggers.md). Use `routes` quando o gatilho for um padrão com caminho (`exemplo.com/rag/*`) ou quando o hostname já tiver um registro DNS administrado em outro lugar. Rotas só funcionam se existir um registro DNS proxied para o hostname; um domínio customizado dispensa esse passo. Os dois podem coexistir no mesmo Worker.
 
 O token precisa de `Workers Scripts Write` e, para rotas, `Workers Routes Edit`.
 
