@@ -73,6 +73,7 @@ module "worker" {
   script_name        = var.name
   script_path        = var.script_path
   compatibility_date = var.compatibility_date
+  subdomain_enabled  = var.subdomain_enabled
+  previews_enabled   = var.previews_enabled
   bindings           = local.bindings
-  routes             = var.routes
 }

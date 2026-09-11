@@ -1,0 +1,10 @@
+{
+  "name": "wrapper-api",
+  "private": true,
+  "scripts": {
+    "build:workers": "node scripts/build-workers.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.10"
+  }
+}

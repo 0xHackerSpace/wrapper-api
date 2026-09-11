@@ -1,6 +1,6 @@
 locals {
   worker_script_paths = {
-    for key, worker in var.workers : key => abspath("${path.root}/../${worker.script_path}")
+    for key, worker in var.workers : key => abspath("${path.root}/${worker.script_path}")
   }
 
   worker_bindings = {

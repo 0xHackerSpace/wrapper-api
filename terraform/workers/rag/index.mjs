@@ -1,6 +1,8 @@
 // Retrieval-augmented generation Worker. Every account, bucket, index and model name arrives through
 // bindings declared by Terraform, so this file stays environment agnostic.
 
+import { verifyToken } from "./lib/jwt.mjs";
+
 const SERVICE = "rag";
 const METADATA_TEXT_LIMIT = 2048;
 const EMBEDDING_BATCH = 50;
@@ -65,28 +67,26 @@ function requireBindings(env) {
   }
 }
 
-// Constant-time comparison so a bound token cannot be recovered by timing the endpoint.
-function secretsMatch(provided, expected) {
-  const encoder = new TextEncoder();
-  const left = encoder.encode(provided);
-  const right = encoder.encode(expected);
-  let mismatch = left.length ^ right.length;
-  for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
-    mismatch |= (left[index] ?? 0) ^ (right[index] ?? 0);
-  }
-  return mismatch === 0;
-}
-
-// Authentication is opt-in: it applies only when an AUTH_TOKEN binding is attached to the Worker.
-function authorize(request, env) {
-  if (!env.AUTH_TOKEN) {
+// JWT authentication: validates Bearer token from Authorization header.
+async function authorize(request, env) {
+  if (!env.JWT_SECRET) {
     return;
   }
+
   const header = request.headers.get("authorization") ?? "";
-  const provided = header.startsWith("Bearer ") ? header.slice(7) : "";
-  if (!secretsMatch(provided, env.AUTH_TOKEN)) {
-    throw new HttpError(401, "unauthorized");
+
+  if (!header.startsWith("Bearer ")) {
+    throw new HttpError(401, "Missing or invalid authorization header");
   }
+
+  const token = header.slice(7);
+  const payload = await verifyToken(token, env.JWT_SECRET);
+
+  if (!payload) {
+    throw new HttpError(401, "Invalid or expired token");
+  }
+
+  return payload;
 }
 
 async function readJson(request) {
@@ -348,7 +348,7 @@ export default {
     try {
       requireBindings(env);
       if (route.authenticated) {
-        authorize(request, env);
+        await authorize(request, env);
       }
       return await route.handler(request, env, configuration(env));
     } catch (error) {

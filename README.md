@@ -1,6 +1,6 @@
 # Cloudflare infrastructure
 
-Base Terraform para administrar infraestrutura Cloudflare e publicar Workers. Terraform e o provider oficial `cloudflare/cloudflare` são a fonte de verdade; a lógica dos Workers fica exclusivamente em `workers/**/*.mjs`.
+Base Terraform para administrar infraestrutura Cloudflare e publicar Workers. Terraform e o provider oficial `cloudflare/cloudflare` são a fonte de verdade; a lógica dos Workers fica exclusivamente em `terraform/workers/**/*.mjs`.
 
 ## Arquitetura
 
@@ -35,12 +35,38 @@ O estado é armazenado e bloqueado no HCP Terraform, organização `0xHackerSpac
 
 ## Adicionar um Worker
 
-1. Crie o código em `workers/<nome>/index.mjs`, usando ES Modules e `export default`.
-2. Adicione uma entrada em `workers` no `terraform.tfvars` do ambiente, apontando `script_path` para o `.mjs`.
-3. Se necessário, declare o recurso em `kv_namespaces`, `r2_buckets`, `d1_databases` ou `queues` e cite-o em `bindings` pelo `resource_key`.
-4. Execute `fmt`, `validate`, `plan` e `apply`.
+1. Crie o código em `terraform/workers/<nome>/src/`, usando ES Modules e `export default`.
+2. Execute `npm ci && npm run build:workers` para gerar o entrypoint em `dist/index.mjs`.
+3. Adicione uma entrada em `workers` no `terraform.tfvars` do ambiente, apontando `script_path` para o `.mjs` em `dist/`.
+4. Se necessário, declare o recurso em `kv_namespaces`, `r2_buckets`, `d1_databases` ou `queues` e cite-o em `bindings` pelo `resource_key`.
+5. Execute `fmt`, `validate`, `plan` e `apply`.
 
 O módulo valida a extensão `.mjs` e envia o conteúdo usando `file()`: não há JavaScript inline em Terraform.
+
+## Acesso aos Workers
+
+Os Workers são automaticamente publicados em `{script_name}.{workers_subdomain}.workers.dev` via `cloudflare_workers_script_subdomain`. Por exemplo, com `workers_subdomain = "0xhackerspace"`, o worker `dev-api` é acessível em:
+
+```
+https://dev-api.0xhackerspace.workers.dev
+```
+
+A configuração é simples: `subdomain_enabled = true` (padrão) e `previews_enabled = false`. Após um `apply` bem-sucedido, o Terraform exibe as URLs públicas de cada worker no output `worker_urls`. Para RAG stacks, o output `rag_stacks` inclui `worker_url`.
+
+```sh
+terraform -chdir=terraform apply -var-file=environments/dev/terraform.tfvars
+# Outputs:
+# worker_urls = {
+#   api = "https://dev-api.0xhackerspace.workers.dev"
+# }
+# rag_stacks = {
+#   rag = {
+#     worker = "dev-rag"
+#     worker_url = "https://dev-rag.0xhackerspace.workers.dev"
+#     ...
+#   }
+# }
+```
 
 ## RAG na Cloudflare
 
@@ -55,7 +81,7 @@ rag_stacks = {
 }
 ```
 
-O Worker recebe índice, bucket, modelos e parâmetros de recuperação por bindings (`AI`, `VECTORIZE`, `DOCUMENTS` e `plain_text`), então `workers/rag/index.mjs` não conhece nomes físicos, IDs ou credenciais. O modelo de embedding padrão `@cf/google/embeddinggemma-300m` gera 768 dimensões, valor padrão de `embedding_dimensions`; alterar um exige alterar o outro, o que recria o índice e pede reindexação a partir do R2.
+O Worker recebe índice, bucket, modelos e parâmetros de recuperação por bindings (`AI`, `VECTORIZE`, `DOCUMENTS` e `plain_text`), então `terraform/workers/rag/index.mjs` não conhece nomes físicos, IDs ou credenciais. O modelo de embedding padrão `@cf/google/embeddinggemma-300m` gera 768 dimensões, valor padrão de `embedding_dimensions`; alterar um exige alterar o outro, o que recria o índice e pede reindexação a partir do R2.
 
 O índice Vectorize é criado pela API da Cloudflare com `terraform_data`, porque o provider 5.23.0 não tem recurso equivalente. O apply precisa de `curl` e de `CLOUDFLARE_API_TOKEN` com permissão `Vectorize Write`. Veja [ADR 0003](docs/decisions/0003-vectorize-api-provisioning.md).
 

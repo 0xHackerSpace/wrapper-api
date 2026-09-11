@@ -7,10 +7,9 @@ resource "cloudflare_workers_script" "this" {
   bindings           = var.bindings
 }
 
-resource "cloudflare_workers_route" "this" {
-  for_each = { for route in var.routes : "${route.zone_id}:${route.pattern}" => route }
-
-  zone_id = each.value.zone_id
-  pattern = each.value.pattern
-  script  = cloudflare_workers_script.this.id
+resource "cloudflare_workers_script_subdomain" "this" {
+  account_id       = var.account_id
+  script_name      = cloudflare_workers_script.this.script_name
+  enabled          = var.subdomain_enabled
+  previews_enabled = var.previews_enabled
 }

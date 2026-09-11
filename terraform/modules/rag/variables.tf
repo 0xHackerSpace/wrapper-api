@@ -40,6 +40,20 @@ variable "compatibility_date" {
   }
 }
 
+variable "subdomain_enabled" {
+  description = "Enable the workers.dev subdomain for this RAG Worker."
+  type        = bool
+  default     = true
+  nullable    = false
+}
+
+variable "previews_enabled" {
+  description = "Enable preview URLs for this RAG Worker."
+  type        = bool
+  default     = false
+  nullable    = false
+}
+
 variable "bucket_name" {
   description = "R2 bucket holding source documents. Defaults to <name>-documents."
   type        = string
@@ -147,16 +161,6 @@ variable "metadata_indexes" {
     documentId = "string"
     source     = "string"
   }
-  nullable = false
-}
-
-variable "routes" {
-  description = "Zone routes that expose the RAG Worker."
-  type = list(object({
-    zone_id = string
-    pattern = string
-  }))
-  default  = []
   nullable = false
 }
 

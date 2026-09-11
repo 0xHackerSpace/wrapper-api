@@ -1,6 +1,6 @@
 locals {
   rag_script_paths = {
-    for key, stack in var.rag_stacks : key => abspath("${path.root}/../${stack.script_path}")
+    for key, stack in var.rag_stacks : key => abspath("${path.root}/${stack.script_path}")
   }
 }
 
@@ -13,6 +13,8 @@ module "rag" {
   name                 = coalesce(each.value.name, "${var.environment}-${each.key}")
   script_path          = local.rag_script_paths[each.key]
   compatibility_date   = each.value.compatibility_date
+  subdomain_enabled    = coalesce(each.value.subdomain_enabled, true)
+  previews_enabled     = coalesce(each.value.previews_enabled, false)
   bucket_name          = each.value.bucket_name
   bucket_location      = each.value.bucket_location
   bucket_jurisdiction  = each.value.bucket_jurisdiction
@@ -26,6 +28,5 @@ module "rag" {
   chunk_overlap        = each.value.chunk_overlap
   top_k                = each.value.top_k
   metadata_indexes     = each.value.metadata_indexes
-  routes               = each.value.routes
   additional_bindings  = each.value.additional_bindings
 }
