@@ -3,7 +3,7 @@ account_id              = "dbe6f61104309ab5a6bf80c5721f4712"
 environment             = "dev"
 workers_subdomain       = "0xhackerspace"
 # cloudflare_api_token should be set via environment variable or HCP Terraform UI
-# jwt_secret should be set via environment variable or HCP Terraform UI
+jwt_secret              = "dev-jwt-secret-key-32-characters-min"
 
 d1_databases = {
   auth = {
@@ -16,6 +16,14 @@ d1_databases = {
       "terraform/migrations/0003_seed_users.sql",
       "terraform/migrations/0004_add_profiles_and_permissions.sql",
       "terraform/migrations/0005_seed_roles_and_permissions.sql"
+    ]
+  }
+  ingredient = {
+    name                  = "dev-ingredient"
+    primary_location_hint = "wnam"
+    run_migrations        = true
+    migrations = [
+      "terraform/migrations/0006_create_ingredients.sql"
     ]
   }
 }
