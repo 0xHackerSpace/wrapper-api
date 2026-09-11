@@ -32,6 +32,13 @@ workers = {
   api = {
     script_path        = "workers/api/dist/index.mjs"
     compatibility_date = "2026-08-24"
+    bindings = [
+      {
+        name         = "INGREDIENTS_DB"
+        type         = "d1"
+        resource_key = "ingredient"
+      }
+    ]
   }
   auth = {
     script_path        = "workers/auth/dist/index.mjs"
