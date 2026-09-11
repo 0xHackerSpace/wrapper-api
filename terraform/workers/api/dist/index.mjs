@@ -86,26 +86,131 @@ async function requireAuth(request, env) {
   return payload;
 }
 
+// terraform/workers/api/src/lib/ingredients-db.mjs
+async function getAllIngredients(db) {
+  if (!db) {
+    throw new Error("Database not configured");
+  }
+  const results = await db.prepare("SELECT id, nome, slug, type, reference, url, permissions, created_at, updated_at FROM ingredients ORDER BY nome").all();
+  return results.results || [];
+}
+async function getIngredientById(db, id) {
+  if (!db) {
+    throw new Error("Database not configured");
+  }
+  const result = await db.prepare("SELECT id, nome, slug, type, reference, url, permissions, created_at, updated_at FROM ingredients WHERE id = ?").bind(id).first();
+  return result || null;
+}
+async function getIngredientBySlug(db, slug) {
+  if (!db) {
+    throw new Error("Database not configured");
+  }
+  const result = await db.prepare("SELECT id, nome, slug, type, reference, url, permissions, created_at, updated_at FROM ingredients WHERE slug = ?").bind(slug).first();
+  return result || null;
+}
+async function createIngredient(db, { id, nome, slug, type, reference, url, permissions }) {
+  if (!db) {
+    throw new Error("Database not configured");
+  }
+  const existingSlug = await getIngredientBySlug(db, slug);
+  if (existingSlug) {
+    throw new Error("Ingredient with this slug already exists");
+  }
+  const result = await db.prepare(
+    "INSERT INTO ingredients (id, nome, slug, type, reference, url, permissions) VALUES (?, ?, ?, ?, ?, ?, ?)"
+  ).bind(id, nome, slug, type, reference || null, url || null, permissions || null).run();
+  if (!result.success) {
+    throw new Error("Failed to create ingredient");
+  }
+  return getIngredientById(db, id);
+}
+async function updateIngredient(db, id, { nome, slug, type, reference, url, permissions }) {
+  if (!db) {
+    throw new Error("Database not configured");
+  }
+  const existing = await getIngredientById(db, id);
+  if (!existing) {
+    throw new Error("Ingredient not found");
+  }
+  if (slug && slug !== existing.slug) {
+    const existingSlug = await getIngredientBySlug(db, slug);
+    if (existingSlug) {
+      throw new Error("Ingredient with this slug already exists");
+    }
+  }
+  const updates = [];
+  const values = [];
+  if (nome !== void 0) {
+    updates.push("nome = ?");
+    values.push(nome);
+  }
+  if (slug !== void 0) {
+    updates.push("slug = ?");
+    values.push(slug);
+  }
+  if (type !== void 0) {
+    updates.push("type = ?");
+    values.push(type);
+  }
+  if (reference !== void 0) {
+    updates.push("reference = ?");
+    values.push(reference);
+  }
+  if (url !== void 0) {
+    updates.push("url = ?");
+    values.push(url);
+  }
+  if (permissions !== void 0) {
+    updates.push("permissions = ?");
+    values.push(permissions);
+  }
+  if (updates.length === 0) {
+    return existing;
+  }
+  updates.push("updated_at = CURRENT_TIMESTAMP");
+  values.push(id);
+  const query = `UPDATE ingredients SET ${updates.join(", ")} WHERE id = ?`;
+  const result = await db.prepare(query).bind(...values).run();
+  if (!result.success) {
+    throw new Error("Failed to update ingredient");
+  }
+  return getIngredientById(db, id);
+}
+async function deleteIngredient(db, id) {
+  if (!db) {
+    throw new Error("Database not configured");
+  }
+  const existing = await getIngredientById(db, id);
+  if (!existing) {
+    throw new Error("Ingredient not found");
+  }
+  const result = await db.prepare("DELETE FROM ingredients WHERE id = ?").bind(id).run();
+  if (!result.success) {
+    throw new Error("Failed to delete ingredient");
+  }
+  return existing;
+}
+
 // terraform/workers/api/src/index.mjs
 var index_default = {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const { pathname } = url;
     try {
-      switch (pathname) {
-        case "/health":
-          return handleHealth(env);
-        case "/":
-          return handleInfo(env);
-        case "/protected":
-          if (request.method !== "GET") return json({ error: "Method not allowed" }, 405);
-          return handleProtected(request, env);
-        case "/profile":
-          if (request.method !== "GET") return json({ error: "Method not allowed" }, 405);
-          return handleProfile(request, env);
-        default:
-          return json({ error: "Not Found" }, 404);
+      if (pathname === "/health") return handleHealth(env);
+      if (pathname === "/") return handleInfo(env);
+      if (pathname === "/protected" && request.method === "GET") return handleProtected(request, env);
+      if (pathname === "/profile" && request.method === "GET") return handleProfile(request, env);
+      const ingredientsMatch = pathname.match(/^\/ingredients(?:\/([^/]+))?$/);
+      if (ingredientsMatch) {
+        const ingredientId = ingredientsMatch[1];
+        if (pathname === "/ingredients" && request.method === "GET") return handleGetAllIngredients(request, env);
+        if (pathname === "/ingredients" && request.method === "POST") return handleCreateIngredient(request, env);
+        if (ingredientId && pathname === `/ingredients/${ingredientId}` && request.method === "GET") return handleGetIngredient(request, env, ingredientId);
+        if (ingredientId && pathname === `/ingredients/${ingredientId}` && request.method === "PUT") return handleUpdateIngredient(request, env, ingredientId);
+        if (ingredientId && pathname === `/ingredients/${ingredientId}` && request.method === "DELETE") return handleDeleteIngredient(request, env, ingredientId);
       }
+      return json({ error: "Not Found" }, 404);
     } catch (error) {
       if (error instanceof AuthError) {
         return json({ error: error.message }, error.status);
@@ -168,6 +273,121 @@ async function handleProfile(request, env) {
       expires_at: new Date(payload.exp * 1e3).toISOString()
     }
   });
+}
+async function handleGetAllIngredients(request, env) {
+  if (!env.INGREDIENTS_DB) {
+    return json({ error: "Ingredients database not configured" }, 500);
+  }
+  try {
+    const ingredients = await getAllIngredients(env.INGREDIENTS_DB);
+    return json({
+      success: true,
+      data: ingredients,
+      count: ingredients.length
+    });
+  } catch (error) {
+    console.error("Get ingredients error:", error);
+    return json({ error: error.message }, 500);
+  }
+}
+async function handleGetIngredient(request, env, ingredientId) {
+  if (!env.INGREDIENTS_DB) {
+    return json({ error: "Ingredients database not configured" }, 500);
+  }
+  try {
+    const ingredient = await getIngredientById(env.INGREDIENTS_DB, ingredientId);
+    if (!ingredient) {
+      return json({ error: "Ingredient not found" }, 404);
+    }
+    return json({
+      success: true,
+      data: ingredient
+    });
+  } catch (error) {
+    console.error("Get ingredient error:", error);
+    return json({ error: error.message }, 500);
+  }
+}
+async function handleCreateIngredient(request, env) {
+  if (!env.INGREDIENTS_DB) {
+    return json({ error: "Ingredients database not configured" }, 500);
+  }
+  try {
+    const body = await request.json();
+    const { nome, slug, type, reference, url, permissions } = body;
+    if (!nome || !slug || !type) {
+      return json({ error: "Missing required fields: nome, slug, type" }, 400);
+    }
+    const id = crypto.randomUUID();
+    const ingredient = await createIngredient(env.INGREDIENTS_DB, {
+      id,
+      nome,
+      slug,
+      type,
+      reference: reference || null,
+      url: url || null,
+      permissions: permissions || null
+    });
+    return json({
+      success: true,
+      data: ingredient
+    }, 201);
+  } catch (error) {
+    console.error("Create ingredient error:", error);
+    if (error.message.includes("already exists")) {
+      return json({ error: error.message }, 409);
+    }
+    return json({ error: error.message }, 500);
+  }
+}
+async function handleUpdateIngredient(request, env, ingredientId) {
+  if (!env.INGREDIENTS_DB) {
+    return json({ error: "Ingredients database not configured" }, 500);
+  }
+  try {
+    const body = await request.json();
+    const { nome, slug, type, reference, url, permissions } = body;
+    const ingredient = await updateIngredient(env.INGREDIENTS_DB, ingredientId, {
+      nome,
+      slug,
+      type,
+      reference,
+      url,
+      permissions
+    });
+    return json({
+      success: true,
+      data: ingredient
+    });
+  } catch (error) {
+    console.error("Update ingredient error:", error);
+    if (error.message.includes("not found")) {
+      return json({ error: error.message }, 404);
+    }
+    if (error.message.includes("already exists")) {
+      return json({ error: error.message }, 409);
+    }
+    return json({ error: error.message }, 500);
+  }
+}
+async function handleDeleteIngredient(request, env, ingredientId) {
+  if (!env.INGREDIENTS_DB) {
+    return json({ error: "Ingredients database not configured" }, 500);
+  }
+  try {
+    const ingredient = await deleteIngredient(env.INGREDIENTS_DB, ingredientId);
+    return json({
+      success: true,
+      data: ingredient,
+      message: "Ingredient deleted successfully"
+    });
+  } catch (error) {
+    console.error("Delete ingredient error:", error);
+    if (error.message.includes("not found")) {
+      return json({ error: error.message }, 404);
+    }
+    return json({ error: error.message }, 500);
+  }
 }
 export {
   index_default as default

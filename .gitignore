@@ -4,3 +4,4 @@ node_modules/
 *.tfstate.*
 *.tfvars.local
 crash.log
+.env
