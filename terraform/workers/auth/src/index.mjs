@@ -1,6 +1,6 @@
 import { generateToken, verifyToken } from "./lib/jwt.mjs";
 import { json, error, unauthorized, badRequest, notFound, internalError } from "./lib/response.mjs";
-import { getUserByUsername, updateLastLogin, logAuthAttempt, createUser } from "./lib/db.mjs";
+import { getUserByUsername, updateLastLogin, logAuthAttempt, createUser, getUserPermissions, getUserProfiles } from "./lib/db.mjs";
 import { verifyPassword, hashPassword, generateRandomId } from "./lib/password.mjs";
 
 export default {
@@ -145,10 +145,24 @@ async function handleLogin(request, env) {
       user = { id: username, username, email: null };
     }
 
+    let permissions = [];
+    let profiles = [];
+
+    if (env.DB) {
+      try {
+        permissions = await getUserPermissions(env.DB, user.id);
+        profiles = await getUserProfiles(env.DB, user.id);
+      } catch (permError) {
+        console.warn("Failed to fetch user permissions:", permError);
+      }
+    }
+
     const payload = {
       sub: user.id,
       username: user.username,
       type: "access",
+      permissions: permissions.map(p => `${p.resource}:${p.action}`),
+      profiles: profiles.map(p => p.name),
     };
 
     const token = await generateToken(payload, env.JWT_SECRET, 3600);
@@ -168,6 +182,8 @@ async function handleLogin(request, env) {
         username: user.username,
         email: user.email,
       },
+      permissions,
+      profiles,
     });
   } catch (error) {
     return badRequest("Invalid request body");

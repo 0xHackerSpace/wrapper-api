@@ -85,3 +85,68 @@ export async function getUserStats(db) {
     return null;
   }
 }
+
+export async function getUserPermissions(db, userId) {
+  if (!db) {
+    throw new DatabaseError("Database not configured");
+  }
+
+  try {
+    const results = await db
+      .prepare(
+        `SELECT DISTINCT
+          p.id,
+          p.resource,
+          p.action,
+          pr.name as profile_name
+        FROM user_profiles up
+        JOIN profiles pr ON up.profile_id = pr.id
+        JOIN profile_permissions pp ON pr.id = pp.profile_id
+        JOIN permissions p ON pp.permission_id = p.id
+        WHERE up.user_id = ?
+        ORDER BY p.resource, p.action`
+      )
+      .bind(userId)
+      .all();
+
+    if (!results.results) {
+      return [];
+    }
+
+    return results.results.map(row => ({
+      resource: row.resource,
+      action: row.action,
+      profile: row.profile_name
+    }));
+  } catch (error) {
+    console.error("Failed to get user permissions:", error);
+    return [];
+  }
+}
+
+export async function getUserProfiles(db, userId) {
+  if (!db) {
+    throw new DatabaseError("Database not configured");
+  }
+
+  try {
+    const results = await db
+      .prepare(
+        `SELECT pr.id, pr.name, pr.description
+        FROM user_profiles up
+        JOIN profiles pr ON up.profile_id = pr.id
+        WHERE up.user_id = ?`
+      )
+      .bind(userId)
+      .all();
+
+    if (!results.results) {
+      return [];
+    }
+
+    return results.results;
+  } catch (error) {
+    console.error("Failed to get user profiles:", error);
+    return [];
+  }
+}

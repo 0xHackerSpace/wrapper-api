@@ -128,6 +128,57 @@ async function logAuthAttempt(db, { userId, action, ipAddress, userAgent, status
     console.warn("Failed to log auth attempt");
   }
 }
+async function getUserPermissions(db, userId) {
+  if (!db) {
+    throw new DatabaseError("Database not configured");
+  }
+  try {
+    const results = await db.prepare(
+      `SELECT DISTINCT
+          p.id,
+          p.resource,
+          p.action,
+          pr.name as profile_name
+        FROM user_profiles up
+        JOIN profiles pr ON up.profile_id = pr.id
+        JOIN profile_permissions pp ON pr.id = pp.profile_id
+        JOIN permissions p ON pp.permission_id = p.id
+        WHERE up.user_id = ?
+        ORDER BY p.resource, p.action`
+    ).bind(userId).all();
+    if (!results.results) {
+      return [];
+    }
+    return results.results.map((row) => ({
+      resource: row.resource,
+      action: row.action,
+      profile: row.profile_name
+    }));
+  } catch (error2) {
+    console.error("Failed to get user permissions:", error2);
+    return [];
+  }
+}
+async function getUserProfiles(db, userId) {
+  if (!db) {
+    throw new DatabaseError("Database not configured");
+  }
+  try {
+    const results = await db.prepare(
+      `SELECT pr.id, pr.name, pr.description
+        FROM user_profiles up
+        JOIN profiles pr ON up.profile_id = pr.id
+        WHERE up.user_id = ?`
+    ).bind(userId).all();
+    if (!results.results) {
+      return [];
+    }
+    return results.results;
+  } catch (error2) {
+    console.error("Failed to get user profiles:", error2);
+    return [];
+  }
+}
 
 // terraform/workers/auth/src/lib/password.mjs
 var encoder2 = new TextEncoder();
@@ -295,10 +346,22 @@ async function handleLogin(request, env) {
       }
       user = { id: username, username, email: null };
     }
+    let permissions = [];
+    let profiles = [];
+    if (env.DB) {
+      try {
+        permissions = await getUserPermissions(env.DB, user.id);
+        profiles = await getUserProfiles(env.DB, user.id);
+      } catch (permError) {
+        console.warn("Failed to fetch user permissions:", permError);
+      }
+    }
     const payload = {
       sub: user.id,
       username: user.username,
-      type: "access"
+      type: "access",
+      permissions: permissions.map((p) => `${p.resource}:${p.action}`),
+      profiles: profiles.map((p) => p.name)
     };
     const token = await generateToken(payload, env.JWT_SECRET, 3600);
     const refreshToken = await generateToken(
@@ -315,7 +378,9 @@ async function handleLogin(request, env) {
         id: user.id,
         username: user.username,
         email: user.email
-      }
+      },
+      permissions,
+      profiles
     });
   } catch (error2) {
     return badRequest("Invalid request body");
