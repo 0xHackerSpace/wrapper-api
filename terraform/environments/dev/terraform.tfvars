@@ -3,6 +3,7 @@ account_id              = "dbe6f61104309ab5a6bf80c5721f4712"
 environment             = "dev"
 workers_subdomain       = "0xhackerspace"
 # cloudflare_api_token should be set via environment variable or HCP Terraform UI
+# jwt_secret should be set via environment variable or HCP Terraform UI
 
 d1_databases = {
   auth = {
@@ -23,7 +24,6 @@ workers = {
   api = {
     script_path        = "workers/api/dist/index.mjs"
     compatibility_date = "2026-08-24"
-    # JWT_SECRET should be set via wrangler secrets
   }
   auth = {
     script_path        = "workers/auth/dist/index.mjs"
@@ -35,7 +35,6 @@ workers = {
         resource_key = "auth"
       }
     ]
-    # JWT_SECRET should be set via wrangler secrets
   }
 }
 
@@ -43,6 +42,5 @@ rag_stacks = {
   rag = {
     script_path        = "workers/rag/dist/index.mjs"
     compatibility_date = "2026-08-24"
-    # JWT_SECRET should be set via wrangler secrets
   }
 }

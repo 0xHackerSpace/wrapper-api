@@ -3,6 +3,12 @@ locals {
     for key, worker in var.workers : key => abspath("${path.root}/${worker.script_path}")
   }
 
+  jwt_secret_binding = var.jwt_secret != "" ? [{
+    name = "JWT_SECRET"
+    type = "secret_text"
+    text = var.jwt_secret
+  }] : []
+
   worker_bindings = {
     for key, worker in var.workers : key => concat(
       [for binding in worker.bindings : merge(
@@ -12,6 +18,7 @@ locals {
         binding.type == "d1" ? { database_id = module.d1[binding.resource_key].id } : {},
         binding.type == "queue" ? { queue_name = module.queues[binding.resource_key].name } : {}
       )],
+      local.jwt_secret_binding,
       worker.additional_bindings
     )
   }

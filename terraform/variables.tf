@@ -31,6 +31,13 @@ variable "cloudflare_api_token" {
   default     = ""
 }
 
+variable "jwt_secret" {
+  description = "JWT secret key for signing and verifying tokens."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
 variable "kv_namespaces" {
   description = "KV namespaces keyed by a stable logical name."
   type        = map(object({ title = optional(string) }))
