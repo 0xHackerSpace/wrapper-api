@@ -19,3 +19,54 @@ Módulos iniciais: `worker`, `dns`, `kv`, `r2`, `d1` e `queues`. `waf` é um pon
 `vectorize` e `rag` seguem esse caminho. `vectorize` administra um índice Vectorize v2; como o provider ainda não possui recurso equivalente, ele usa `terraform_data` e a API da Cloudflare, conforme [ADR 0003](decisions/0003-vectorize-api-provisioning.md). `rag` compõe `r2`, `vectorize` e `worker` em uma stack de retrieval-augmented generation e entrega índice, bucket, modelos de Workers AI e parâmetros de recuperação ao Worker por bindings `ai`, `vectorize`, `r2_bucket` e `plain_text`.
 
 Os tokens e secrets não são inputs do projeto. Use `CLOUDFLARE_API_TOKEN` e, para bindings secretos futuros, uma fonte segura/CI; valores secretos jamais devem entrar em `.tfvars` versionado.
+
+## Autenticação e RBAC
+
+O projeto implementa autenticação JWT e controle de acesso baseado em papéis (RBAC), conforme [ADR 0007](decisions/0007-rbac-jwt-permissions.md).
+
+**Fluxo:**
+1. Worker Auth valida credenciais contra D1 (`dev-auth`)
+2. Fetch permissões via relacionamentos: `user_profiles` → `profiles` → `profile_permissions` → `permissions`
+3. JWT retornado inclui `permissions` (array de `"resource:action"`) e `profiles` (array de nomes)
+4. Cliente decodifica JWT e limita UI conforme permissões
+5. Worker API valida JWT antes de executar operações protegidas
+
+**Recursos e Ações:**
+- `user`, `profile`, `permission`: CRUD completo
+- `auth`: login, logout
+- `api`: access
+- `rag`: ingest, query
+
+**Profiles Predefinidos:**
+- Admin (17 permissões)
+- User (5 permissões)
+- Guest (2 permissões)
+- RAG User (4 permissões)
+- API User (3 permissões)
+
+## Bancos de Dados Múltiplos
+
+Conforme [ADR 0004](decisions/0004-d1-multiple-databases.md), usamos múltiplos D1s separados por domínio:
+
+- **dev-auth**: Usuários, logs, profiles, permissões (5 migrations)
+- **dev-ingredient**: Ingredientes (1 migration)
+
+Cada Worker recebe bindings D1 específicos no `tfvars`; migrations rodam via `wrangler d1 execute --remote`.
+
+## API de Ingredientes
+
+Conforme [ADR 0006](decisions/0006-ingredients-crud-api.md), ingredientes são gerenciados via endpoints RESTful:
+
+```
+GET    /ingredients      - Listar todos
+GET    /ingredients/:id  - Obter um
+POST   /ingredients      - Criar (requer: nome, slug, type)
+PUT    /ingredients/:id  - Atualizar
+DELETE /ingredients/:id  - Deletar
+```
+
+Campos: `id` (UUID), `nome`, `slug` (UNIQUE), `type`, `reference`, `url`, `permissions`, timestamps.
+
+## Gerenciamento de Secrets
+
+Conforme [ADR 0005](decisions/0005-jwt-secret-management.md), `JWT_SECRET` é uma variável Terraform sensível injetada em todos os Workers como binding de tipo `secret_text`. Nunca é commitado; definido via `export TF_VAR_jwt_secret="..."` ou HCP Terraform UI.
