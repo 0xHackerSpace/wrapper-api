@@ -14,6 +14,9 @@ function badRequest(message) {
 function notFound(message = "Not found") {
   return error(message, 404);
 }
+function conflict(message) {
+  return error(message, 409);
+}
 function internalError(message) {
   return error(message, 500);
 }
@@ -103,6 +106,11 @@ async function requirePermission(request, env, permission) {
 // terraform/workers/graph/src/lib/graph-db.mjs
 var ValidationError = class extends Error {
 };
+var ConflictError = class extends Error {
+};
+function isUniqueConstraintError(error2) {
+  return typeof error2.message === "string" && error2.message.includes("UNIQUE constraint failed");
+}
 function serializeProperties(properties) {
   if (properties === void 0 || properties === null) {
     return null;
@@ -127,7 +135,8 @@ function mapNodeRow(row) {
     label: row.label,
     properties: parseProperties(row.properties),
     source_document_id: row.source_document_id ?? null,
-    created_at: row.created_at
+    created_at: row.created_at,
+    updated_at: row.updated_at
   };
 }
 function mapEdgeRow(row) {
@@ -138,21 +147,22 @@ function mapEdgeRow(row) {
     to_node_id: row.to_node_id,
     relation: row.relation,
     properties: parseProperties(row.properties),
-    created_at: row.created_at
+    created_at: row.created_at,
+    updated_at: row.updated_at
   };
 }
 async function getNodeById(db, id) {
   if (!db) {
     throw new Error("Database not configured");
   }
-  const row = await db.prepare("SELECT id, type, label, properties, source_document_id, created_at FROM nodes WHERE id = ?").bind(id).first();
+  const row = await db.prepare("SELECT id, type, label, properties, source_document_id, created_at, updated_at FROM nodes WHERE id = ?").bind(id).first();
   return mapNodeRow(row);
 }
 async function listNodesByType(db, type) {
   if (!db) {
     throw new Error("Database not configured");
   }
-  const results = await db.prepare("SELECT id, type, label, properties, source_document_id, created_at FROM nodes WHERE type = ? ORDER BY created_at").bind(type).all();
+  const results = await db.prepare("SELECT id, type, label, properties, source_document_id, created_at, updated_at FROM nodes WHERE type = ? ORDER BY created_at").bind(type).all();
   return (results.results || []).map(mapNodeRow);
 }
 async function createNode(db, { id, type, label, properties, source_document_id }) {
@@ -168,11 +178,19 @@ async function createNode(db, { id, type, label, properties, source_document_id 
   const nodeId = id || crypto.randomUUID();
   const existing = await getNodeById(db, nodeId);
   if (existing) {
-    throw new Error("Node with this id already exists");
+    throw new ConflictError("Node with this id already exists");
   }
-  const result = await db.prepare(
-    "INSERT INTO nodes (id, type, label, properties, source_document_id) VALUES (?, ?, ?, ?, ?)"
-  ).bind(nodeId, type, label, serializeProperties(properties), source_document_id || null).run();
+  let result;
+  try {
+    result = await db.prepare(
+      "INSERT INTO nodes (id, type, label, properties, source_document_id) VALUES (?, ?, ?, ?, ?)"
+    ).bind(nodeId, type, label, serializeProperties(properties), source_document_id || null).run();
+  } catch (error2) {
+    if (isUniqueConstraintError(error2)) {
+      throw new ConflictError("Node with this id already exists");
+    }
+    throw error2;
+  }
   if (!result.success) {
     throw new Error("Failed to create node");
   }
@@ -239,14 +257,26 @@ async function createEdge(db, { id, from_node_id, to_node_id, relation, properti
   if (!toNode) {
     throw new ValidationError("to_node_id does not reference an existing node");
   }
+  const duplicate = await db.prepare("SELECT id FROM edges WHERE from_node_id = ? AND to_node_id = ? AND relation = ?").bind(from_node_id, to_node_id, relation).first();
+  if (duplicate) {
+    throw new ConflictError("An edge with this from_node_id, to_node_id, and relation already exists");
+  }
   const edgeId = id || crypto.randomUUID();
-  const result = await db.prepare(
-    "INSERT INTO edges (id, from_node_id, to_node_id, relation, properties) VALUES (?, ?, ?, ?, ?)"
-  ).bind(edgeId, from_node_id, to_node_id, relation, serializeProperties(properties)).run();
+  let result;
+  try {
+    result = await db.prepare(
+      "INSERT INTO edges (id, from_node_id, to_node_id, relation, properties) VALUES (?, ?, ?, ?, ?)"
+    ).bind(edgeId, from_node_id, to_node_id, relation, serializeProperties(properties)).run();
+  } catch (error2) {
+    if (isUniqueConstraintError(error2)) {
+      throw new ConflictError("An edge with this from_node_id, to_node_id, and relation already exists");
+    }
+    throw error2;
+  }
   if (!result.success) {
     throw new Error("Failed to create edge");
   }
-  const created = await db.prepare("SELECT id, from_node_id, to_node_id, relation, properties, created_at FROM edges WHERE id = ?").bind(edgeId).first();
+  const created = await db.prepare("SELECT id, from_node_id, to_node_id, relation, properties, created_at, updated_at FROM edges WHERE id = ?").bind(edgeId).first();
   return mapEdgeRow(created);
 }
 
@@ -288,6 +318,9 @@ var index_default = {
       }
       if (error2 instanceof ValidationError) {
         return badRequest(error2.message);
+      }
+      if (error2 instanceof ConflictError) {
+        return conflict(error2.message);
       }
       console.error(error2);
       return internalError(error2.message);

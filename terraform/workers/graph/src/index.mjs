@@ -1,4 +1,4 @@
-import { json, badRequest, notFound, internalError } from "./lib/response.mjs";
+import { json, badRequest, notFound, internalError, conflict } from "./lib/response.mjs";
 import { requirePermission, AuthError } from "./lib/auth.mjs";
 import {
   getNodeById,
@@ -8,6 +8,7 @@ import {
   getRelationsBetween,
   createEdge,
   ValidationError,
+  ConflictError,
 } from "./lib/graph-db.mjs";
 
 export default {
@@ -52,6 +53,9 @@ export default {
       }
       if (error instanceof ValidationError) {
         return badRequest(error.message);
+      }
+      if (error instanceof ConflictError) {
+        return conflict(error.message);
       }
       console.error(error);
       return internalError(error.message);

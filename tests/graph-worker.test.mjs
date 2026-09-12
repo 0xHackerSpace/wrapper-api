@@ -23,6 +23,14 @@ function createGraphDB(seedNodes = [], seedEdges = []) {
         if (sql.includes("FROM edges") && sql.includes("WHERE id = ?")) {
           return edges.find((e) => e.id === boundArgs[0]) || null;
         }
+        if (sql.includes("FROM edges") && sql.includes("relation = ?") && !sql.includes("JOIN nodes")) {
+          const [from_node_id, to_node_id, relation] = boundArgs;
+          return (
+            edges.find(
+              (e) => e.from_node_id === from_node_id && e.to_node_id === to_node_id && e.relation === relation
+            ) || null
+          );
+        }
         return null;
       },
       async all() {
@@ -65,12 +73,20 @@ function createGraphDB(seedNodes = [], seedEdges = []) {
       async run() {
         if (sql.startsWith("INSERT INTO nodes")) {
           const [id, type, label, properties, source_document_id] = boundArgs;
-          nodes.push({ id, type, label, properties, source_document_id, created_at: new Date().toISOString() });
+          if (nodes.some((n) => n.id === id)) {
+            throw new Error("UNIQUE constraint failed: nodes.id");
+          }
+          const now = new Date().toISOString();
+          nodes.push({ id, type, label, properties, source_document_id, created_at: now, updated_at: now });
           return { success: true };
         }
         if (sql.startsWith("INSERT INTO edges")) {
           const [id, from_node_id, to_node_id, relation, properties] = boundArgs;
-          edges.push({ id, from_node_id, to_node_id, relation, properties, created_at: new Date().toISOString() });
+          if (edges.some((e) => e.from_node_id === from_node_id && e.to_node_id === to_node_id && e.relation === relation)) {
+            throw new Error("UNIQUE constraint failed: edges.from_node_id, edges.to_node_id, edges.relation");
+          }
+          const now = new Date().toISOString();
+          edges.push({ id, from_node_id, to_node_id, relation, properties, created_at: now, updated_at: now });
           return { success: true };
         }
         return { success: false };
@@ -186,6 +202,19 @@ test("POST /v1/nodes creates a node with generated id", async () => {
   assert.equal(db._nodes.length, 1);
 });
 
+test("POST /v1/nodes rejects a duplicate client-supplied id with 409", async () => {
+  const { post } = harness({
+    GRAPH_DB: createGraphDB([
+      { id: "n1", type: "concept", label: "A", properties: null, source_document_id: null, created_at: "t1" },
+    ]),
+  });
+  const headers = await authHeader();
+
+  const { status, body } = await post("/v1/nodes", { id: "n1", type: "concept", label: "B" }, headers);
+  assert.equal(status, 409);
+  assert.match(body.error.message, /already exists/);
+});
+
 test("GET /v1/nodes/:id returns a node or 404", async () => {
   const { get } = harness({
     GRAPH_DB: createGraphDB([
@@ -255,6 +284,27 @@ test("POST /v1/edges rejects a reference to a non-existent node with 400", async
 
   assert.equal(status, 400);
   assert.match(body.error.message, /to_node_id/);
+});
+
+test("POST /v1/edges rejects a duplicate from/to/relation triple with 409", async () => {
+  const { post } = harness({
+    GRAPH_DB: createGraphDB(
+      [
+        { id: "n1", type: "concept", label: "A", properties: null, source_document_id: null, created_at: "t1" },
+        { id: "n2", type: "concept", label: "B", properties: null, source_document_id: null, created_at: "t2" },
+      ],
+      [{ id: "e1", from_node_id: "n1", to_node_id: "n2", relation: "related_to", properties: null, created_at: "t1" }]
+    ),
+  });
+  const headers = await authHeader();
+
+  const { status, body } = await post(
+    "/v1/edges",
+    { from_node_id: "n1", to_node_id: "n2", relation: "related_to" },
+    headers
+  );
+  assert.equal(status, 409);
+  assert.match(body.error.message, /already exists/);
 });
 
 test("GET /v1/nodes/:id/neighbors lists connected nodes with relation info", async () => {

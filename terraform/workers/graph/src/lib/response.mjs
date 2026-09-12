@@ -21,6 +21,10 @@ export function notFound(message = "Not found") {
   return error(message, 404);
 }
 
+export function conflict(message) {
+  return error(message, 409);
+}
+
 export function internalError(message) {
   return error(message, 500);
 }

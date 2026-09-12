@@ -1,4 +1,9 @@
 export class ValidationError extends Error {}
+export class ConflictError extends Error {}
+
+function isUniqueConstraintError(error) {
+  return typeof error.message === "string" && error.message.includes("UNIQUE constraint failed");
+}
 
 function serializeProperties(properties) {
   if (properties === undefined || properties === null) {
@@ -27,6 +32,7 @@ function mapNodeRow(row) {
     properties: parseProperties(row.properties),
     source_document_id: row.source_document_id ?? null,
     created_at: row.created_at,
+    updated_at: row.updated_at,
   };
 }
 
@@ -39,6 +45,7 @@ function mapEdgeRow(row) {
     relation: row.relation,
     properties: parseProperties(row.properties),
     created_at: row.created_at,
+    updated_at: row.updated_at,
   };
 }
 
@@ -48,7 +55,7 @@ export async function getNodeById(db, id) {
   }
 
   const row = await db
-    .prepare("SELECT id, type, label, properties, source_document_id, created_at FROM nodes WHERE id = ?")
+    .prepare("SELECT id, type, label, properties, source_document_id, created_at, updated_at FROM nodes WHERE id = ?")
     .bind(id)
     .first();
 
@@ -61,7 +68,7 @@ export async function listNodesByType(db, type) {
   }
 
   const results = await db
-    .prepare("SELECT id, type, label, properties, source_document_id, created_at FROM nodes WHERE type = ? ORDER BY created_at")
+    .prepare("SELECT id, type, label, properties, source_document_id, created_at, updated_at FROM nodes WHERE type = ? ORDER BY created_at")
     .bind(type)
     .all();
 
@@ -84,15 +91,23 @@ export async function createNode(db, { id, type, label, properties, source_docum
 
   const existing = await getNodeById(db, nodeId);
   if (existing) {
-    throw new Error("Node with this id already exists");
+    throw new ConflictError("Node with this id already exists");
   }
 
-  const result = await db
-    .prepare(
-      "INSERT INTO nodes (id, type, label, properties, source_document_id) VALUES (?, ?, ?, ?, ?)"
-    )
-    .bind(nodeId, type, label, serializeProperties(properties), source_document_id || null)
-    .run();
+  let result;
+  try {
+    result = await db
+      .prepare(
+        "INSERT INTO nodes (id, type, label, properties, source_document_id) VALUES (?, ?, ?, ?, ?)"
+      )
+      .bind(nodeId, type, label, serializeProperties(properties), source_document_id || null)
+      .run();
+  } catch (error) {
+    if (isUniqueConstraintError(error)) {
+      throw new ConflictError("Node with this id already exists");
+    }
+    throw error;
+  }
 
   if (!result.success) {
     throw new Error("Failed to create node");
@@ -178,21 +193,37 @@ export async function createEdge(db, { id, from_node_id, to_node_id, relation, p
     throw new ValidationError("to_node_id does not reference an existing node");
   }
 
+  const duplicate = await db
+    .prepare("SELECT id FROM edges WHERE from_node_id = ? AND to_node_id = ? AND relation = ?")
+    .bind(from_node_id, to_node_id, relation)
+    .first();
+  if (duplicate) {
+    throw new ConflictError("An edge with this from_node_id, to_node_id, and relation already exists");
+  }
+
   const edgeId = id || crypto.randomUUID();
 
-  const result = await db
-    .prepare(
-      "INSERT INTO edges (id, from_node_id, to_node_id, relation, properties) VALUES (?, ?, ?, ?, ?)"
-    )
-    .bind(edgeId, from_node_id, to_node_id, relation, serializeProperties(properties))
-    .run();
+  let result;
+  try {
+    result = await db
+      .prepare(
+        "INSERT INTO edges (id, from_node_id, to_node_id, relation, properties) VALUES (?, ?, ?, ?, ?)"
+      )
+      .bind(edgeId, from_node_id, to_node_id, relation, serializeProperties(properties))
+      .run();
+  } catch (error) {
+    if (isUniqueConstraintError(error)) {
+      throw new ConflictError("An edge with this from_node_id, to_node_id, and relation already exists");
+    }
+    throw error;
+  }
 
   if (!result.success) {
     throw new Error("Failed to create edge");
   }
 
   const created = await db
-    .prepare("SELECT id, from_node_id, to_node_id, relation, properties, created_at FROM edges WHERE id = ?")
+    .prepare("SELECT id, from_node_id, to_node_id, relation, properties, created_at, updated_at FROM edges WHERE id = ?")
     .bind(edgeId)
     .first();
 
