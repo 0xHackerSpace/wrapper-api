@@ -2,7 +2,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import worker from "../workers/rag/index.mjs";
+import worker from "../terraform/workers/rag/index.mjs";
+import { generateToken } from "../terraform/workers/rag/lib/jwt.mjs";
 
 function harness(overrides = {}) {
   const objects = new Map();
@@ -143,12 +144,13 @@ test("requests are validated before reaching Workers AI", async () => {
   assert.equal((await call("/ingest", { method: "GET" })).status, 405);
 });
 
-test("an AUTH_TOKEN binding protects /ingest and /query but not /health", async () => {
-  const { post, call } = harness({ AUTH_TOKEN: "s3cret" });
+test("a JWT_SECRET binding protects /ingest and /query but not /health", async () => {
+  const { post, call } = harness({ JWT_SECRET: "s3cret" });
+  const validToken = await generateToken({ sub: "user-1" }, "s3cret");
 
   assert.equal((await post("/query", { question: "hi" })).status, 401);
   assert.equal((await post("/query", { question: "hi" }, { authorization: "Bearer wrong" })).status, 401);
-  assert.equal((await post("/query", { question: "hi" }, { authorization: "Bearer s3cret" })).status, 200);
+  assert.equal((await post("/query", { question: "hi" }, { authorization: `Bearer ${validToken}` })).status, 200);
   assert.equal((await call("/health", { method: "GET" })).status, 200);
 });
 
