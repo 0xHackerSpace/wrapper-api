@@ -5,7 +5,9 @@ import test from "node:test";
 import worker from "../terraform/workers/graph/src/index.mjs";
 import { generateToken } from "../terraform/workers/graph/src/lib/jwt.mjs";
 
-function createGraphDB(seedNodes = [], seedEdges = []) {
+function createGraphDB(seedGraphs = [], seedAccess = [], seedNodes = [], seedEdges = []) {
+  const graphs = [...seedGraphs];
+  const access = [...seedAccess];
   const nodes = [...seedNodes];
   const edges = [...seedEdges];
 
@@ -17,8 +19,16 @@ function createGraphDB(seedNodes = [], seedEdges = []) {
         return this;
       },
       async first() {
-        if (sql.includes("FROM nodes") && sql.includes("WHERE id = ?")) {
-          return nodes.find((n) => n.id === boundArgs[0]) || null;
+        if (sql.includes("FROM graphs") && sql.includes("WHERE id = ?")) {
+          return graphs.find((g) => g.id === boundArgs[0]) || null;
+        }
+        if (sql.includes("FROM graph_access") && sql.includes("WHERE graph_id = ? AND user_id = ?")) {
+          const [graphId, userId] = boundArgs;
+          return access.find((a) => a.graph_id === graphId && a.user_id === userId) || null;
+        }
+        if (sql.includes("FROM nodes") && sql.includes("WHERE id = ? AND graph_id = ?")) {
+          const [id, graphId] = boundArgs;
+          return nodes.find((n) => n.id === id && n.graph_id === graphId) || null;
         }
         if (sql.includes("FROM edges") && sql.includes("WHERE id = ?")) {
           return edges.find((e) => e.id === boundArgs[0]) || null;
@@ -34,25 +44,39 @@ function createGraphDB(seedNodes = [], seedEdges = []) {
         return null;
       },
       async all() {
+        if (sql.includes("FROM graphs g") && sql.includes("JOIN graph_access")) {
+          const userId = boundArgs[0];
+          const results = access
+            .filter((a) => a.user_id === userId)
+            .map((a) => {
+              const g = graphs.find((g) => g.id === a.graph_id);
+              return { id: g.id, name: g.name, created_by: g.created_by, created_at: g.created_at, role: a.role };
+            })
+            .sort((x, y) => (x.created_at || "").localeCompare(y.created_at || ""));
+          return { results };
+        }
         if (sql.includes("FROM edges e") && sql.includes("JOIN nodes n")) {
-          const nodeId = boundArgs[0];
+          const [nodeId, , , graphId] = boundArgs;
           const matched = edges.filter((e) => e.from_node_id === nodeId || e.to_node_id === nodeId);
-          const results = matched.map((e) => {
-            const neighborId = e.from_node_id === nodeId ? e.to_node_id : e.from_node_id;
-            const neighbor = nodes.find((n) => n.id === neighborId);
-            return {
-              edge_id: e.id,
-              relation: e.relation,
-              edge_properties: e.properties,
-              from_node_id: e.from_node_id,
-              to_node_id: e.to_node_id,
-              neighbor_id: neighbor?.id,
-              neighbor_type: neighbor?.type,
-              neighbor_label: neighbor?.label,
-              neighbor_properties: neighbor?.properties,
-              neighbor_source_document_id: neighbor?.source_document_id,
-            };
-          });
+          const results = matched
+            .map((e) => {
+              const neighborId = e.from_node_id === nodeId ? e.to_node_id : e.from_node_id;
+              const neighbor = nodes.find((n) => n.id === neighborId);
+              if (!neighbor || neighbor.graph_id !== graphId) return null;
+              return {
+                edge_id: e.id,
+                relation: e.relation,
+                edge_properties: e.properties,
+                from_node_id: e.from_node_id,
+                to_node_id: e.to_node_id,
+                neighbor_id: neighbor.id,
+                neighbor_type: neighbor.type,
+                neighbor_label: neighbor.label,
+                neighbor_properties: neighbor.properties,
+                neighbor_source_document_id: neighbor.source_document_id,
+              };
+            })
+            .filter(Boolean);
           return { results };
         }
         if (sql.includes("FROM edges") && sql.includes("WHERE (from_node_id = ? AND to_node_id = ?)")) {
@@ -62,27 +86,43 @@ function createGraphDB(seedNodes = [], seedEdges = []) {
           );
           return { results };
         }
-        if (sql.includes("FROM nodes") && sql.includes("WHERE type = ?")) {
+        if (sql.includes("FROM nodes") && sql.includes("WHERE graph_id = ? AND type = ?")) {
+          const [graphId, type] = boundArgs;
           const results = nodes
-            .filter((n) => n.type === boundArgs[0])
+            .filter((n) => n.graph_id === graphId && n.type === type)
             .sort((x, y) => (x.created_at || "").localeCompare(y.created_at || ""));
           return { results };
         }
         return { results: [] };
       },
       async run() {
+        if (sql.startsWith("INSERT INTO graphs")) {
+          const [id, name, created_by] = boundArgs;
+          if (graphs.some((g) => g.id === id)) {
+            throw new Error("UNIQUE constraint failed: graphs.id");
+          }
+          graphs.push({ id, name, created_by, created_at: new Date().toISOString() });
+          return { success: true };
+        }
+        if (sql.startsWith("INSERT INTO graph_access")) {
+          const [id, graph_id, user_id, role] = boundArgs;
+          access.push({ id, graph_id, user_id, role, created_at: new Date().toISOString() });
+          return { success: true };
+        }
         if (sql.startsWith("INSERT INTO nodes")) {
-          const [id, type, label, properties, source_document_id] = boundArgs;
+          const [id, graph_id, type, label, properties, source_document_id] = boundArgs;
           if (nodes.some((n) => n.id === id)) {
             throw new Error("UNIQUE constraint failed: nodes.id");
           }
           const now = new Date().toISOString();
-          nodes.push({ id, type, label, properties, source_document_id, created_at: now, updated_at: now });
+          nodes.push({ id, graph_id, type, label, properties, source_document_id, created_at: now, updated_at: now });
           return { success: true };
         }
         if (sql.startsWith("INSERT INTO edges")) {
           const [id, from_node_id, to_node_id, relation, properties] = boundArgs;
-          if (edges.some((e) => e.from_node_id === from_node_id && e.to_node_id === to_node_id && e.relation === relation)) {
+          if (
+            edges.some((e) => e.from_node_id === from_node_id && e.to_node_id === to_node_id && e.relation === relation)
+          ) {
             throw new Error("UNIQUE constraint failed: edges.from_node_id, edges.to_node_id, edges.relation");
           }
           const now = new Date().toISOString();
@@ -96,6 +136,8 @@ function createGraphDB(seedNodes = [], seedEdges = []) {
 
   return {
     prepare: (sql) => makeStatement(sql),
+    _graphs: graphs,
+    _access: access,
     _nodes: nodes,
     _edges: edges,
   };
@@ -129,6 +171,14 @@ async function authHeader(payload = { sub: "user-1", username: "ianoliv", permis
   return { authorization: `Bearer ${token}` };
 }
 
+function seedGraph(db, { id = "g1", name = "Graph 1", createdBy = "user-1", owners = [], editors = [], viewers = [] } = {}) {
+  db._graphs.push({ id, name, created_by: createdBy, created_at: "t0" });
+  for (const userId of owners) db._access.push({ id: `acc-${id}-${userId}`, graph_id: id, user_id: userId, role: "owner" });
+  for (const userId of editors) db._access.push({ id: `acc-${id}-${userId}`, graph_id: id, user_id: userId, role: "editor" });
+  for (const userId of viewers) db._access.push({ id: `acc-${id}-${userId}`, graph_id: id, user_id: userId, role: "viewer" });
+  return id;
+}
+
 test("GET /health reports service status without auth", async () => {
   const { get } = harness();
   const { status, body } = await get("/health");
@@ -144,57 +194,136 @@ test("GET /v1 lists available endpoints", async () => {
 
   assert.equal(status, 200);
   assert.equal(body.service, "graph");
+  assert.ok(body.endpoints.create_graph);
   assert.ok(body.endpoints.create_node);
 });
 
-test("POST /v1/nodes requires a valid JWT", async () => {
+test("POST /v1/graphs requires a valid JWT with the graph:write permission", async () => {
   const { post } = harness();
 
-  const noAuth = await post("/v1/nodes", { type: "concept", label: "Photosynthesis" });
-  assert.equal(noAuth.status, 401);
-  assert.equal(noAuth.body.error.type, "invalid_request_error");
+  assert.equal((await post("/v1/graphs", { name: "My graph" })).status, 401);
+  assert.equal((await post("/v1/graphs", { name: "My graph" }, { authorization: "Bearer invalid" })).status, 401);
 
-  const badAuth = await post("/v1/nodes", { type: "concept", label: "Photosynthesis" }, { authorization: "Bearer invalid" });
-  assert.equal(badAuth.status, 401);
+  const readOnly = await authHeader({ sub: "user-1", permissions: ["graph:read"] });
+  assert.equal((await post("/v1/graphs", { name: "My graph" }, readOnly)).status, 403);
 });
 
-test("graph:read and graph:write are enforced independently", async () => {
-  const { get, post } = harness();
+test("POST /v1/graphs creates a graph and grants the creator owner access", async () => {
+  const { post, db } = harness();
+  const headers = await authHeader();
+
+  const { status, body } = await post("/v1/graphs", { name: "My graph" }, headers);
+
+  assert.equal(status, 201);
+  assert.equal(body.data.name, "My graph");
+  assert.ok(body.data.id);
+  assert.equal(db._graphs.length, 1);
+  assert.equal(db._access.length, 1);
+  assert.equal(db._access[0].role, "owner");
+  assert.equal(db._access[0].user_id, "user-1");
+});
+
+test("GET /v1/graphs lists only graphs the caller has access to", async () => {
+  const db = createGraphDB();
+  seedGraph(db, { id: "g1", owners: ["user-1"] });
+  seedGraph(db, { id: "g2", owners: ["user-2"] });
+  const { get } = harness({ GRAPH_DB: db });
+  const headers = await authHeader();
+
+  const { status, body } = await get("/v1/graphs", headers);
+
+  assert.equal(status, 200);
+  assert.equal(body.count, 1);
+  assert.equal(body.data[0].id, "g1");
+  assert.equal(body.data[0].role, "owner");
+});
+
+test("graph:read and graph:write RBAC permissions are enforced independently of graph access", async () => {
+  const db = createGraphDB();
+  seedGraph(db, { id: "g1", owners: ["user-1"] });
+  const { get, post } = harness({ GRAPH_DB: db });
   const readOnly = await authHeader({ sub: "user-1", permissions: ["graph:read"] });
   const writeOnly = await authHeader({ sub: "user-1", permissions: ["graph:write"] });
 
-  const writeWithReadOnly = await post("/v1/nodes", { type: "concept", label: "A" }, readOnly);
+  const writeWithReadOnly = await post("/v1/graphs/g1/nodes", { type: "concept", label: "A" }, readOnly);
   assert.equal(writeWithReadOnly.status, 403);
 
-  const readWithWriteOnly = await get("/v1/nodes?type=concept", writeOnly);
+  const readWithWriteOnly = await get("/v1/graphs/g1/nodes?type=concept", writeOnly);
   assert.equal(readWithWriteOnly.status, 403);
 });
 
-test("POST /v1/nodes rejects missing required fields with 400, not 500", async () => {
-  const { post } = harness();
+test("a valid RBAC permission alone does not grant access to someone else's graph", async () => {
+  const db = createGraphDB();
+  seedGraph(db, { id: "g1", owners: ["user-2"] });
+  const { get, post } = harness({ GRAPH_DB: db });
+  const headers = await authHeader({ sub: "user-1", permissions: ["graph:read", "graph:write"] });
+
+  const read = await get("/v1/graphs/g1/nodes?type=concept", headers);
+  assert.equal(read.status, 403);
+  assert.match(read.body.error.message, /No access to this graph/);
+
+  const write = await post("/v1/graphs/g1/nodes", { type: "concept", label: "A" }, headers);
+  assert.equal(write.status, 403);
+});
+
+test("a viewer can read but not write in a graph", async () => {
+  const db = createGraphDB();
+  seedGraph(db, { id: "g1", viewers: ["user-1"] });
+  const { get, post } = harness({ GRAPH_DB: db });
   const headers = await authHeader();
 
-  const missingLabel = await post("/v1/nodes", { type: "concept" }, headers);
+  assert.equal((await get("/v1/graphs/g1/nodes?type=concept", headers)).status, 200);
+  assert.equal((await post("/v1/graphs/g1/nodes", { type: "concept", label: "A" }, headers)).status, 403);
+});
+
+test("an editor can read and write in a graph", async () => {
+  const db = createGraphDB();
+  seedGraph(db, { id: "g1", editors: ["user-1"] });
+  const { get, post } = harness({ GRAPH_DB: db });
+  const headers = await authHeader();
+
+  assert.equal((await get("/v1/graphs/g1/nodes?type=concept", headers)).status, 200);
+  assert.equal((await post("/v1/graphs/g1/nodes", { type: "concept", label: "A" }, headers)).status, 201);
+});
+
+test("requests to a non-existent graph return 404", async () => {
+  const { get, post } = harness();
+  const headers = await authHeader();
+
+  assert.equal((await get("/v1/graphs/missing/nodes?type=concept", headers)).status, 404);
+  assert.equal((await post("/v1/graphs/missing/nodes", { type: "concept", label: "A" }, headers)).status, 404);
+});
+
+test("POST /v1/graphs/:graphId/nodes rejects missing required fields with 400, not 500", async () => {
+  const db = createGraphDB();
+  seedGraph(db, { id: "g1", owners: ["user-1"] });
+  const { post } = harness({ GRAPH_DB: db });
+  const headers = await authHeader();
+
+  const missingLabel = await post("/v1/graphs/g1/nodes", { type: "concept" }, headers);
   assert.equal(missingLabel.status, 400);
   assert.match(missingLabel.body.error.message, /label/);
 
-  const missingType = await post("/v1/nodes", { label: "Photosynthesis" }, headers);
+  const missingType = await post("/v1/graphs/g1/nodes", { label: "Photosynthesis" }, headers);
   assert.equal(missingType.status, 400);
   assert.match(missingType.body.error.message, /type/);
 });
 
-test("POST /v1/nodes creates a node with generated id", async () => {
-  const { post, db } = harness();
+test("POST /v1/graphs/:graphId/nodes creates a node scoped to the graph", async () => {
+  const db = createGraphDB();
+  seedGraph(db, { id: "g1", owners: ["user-1"] });
+  const { post } = harness({ GRAPH_DB: db });
   const headers = await authHeader();
 
   const { status, body } = await post(
-    "/v1/nodes",
+    "/v1/graphs/g1/nodes",
     { type: "concept", label: "Photosynthesis", properties: { confidence: 0.9 } },
     headers
   );
 
   assert.equal(status, 201);
   assert.equal(body.success, true);
+  assert.equal(body.data.graph_id, "g1");
   assert.equal(body.data.type, "concept");
   assert.equal(body.data.label, "Photosynthesis");
   assert.deepEqual(body.data.properties, { confidence: 0.9 });
@@ -202,61 +331,66 @@ test("POST /v1/nodes creates a node with generated id", async () => {
   assert.equal(db._nodes.length, 1);
 });
 
-test("POST /v1/nodes rejects a duplicate client-supplied id with 409", async () => {
-  const { post } = harness({
-    GRAPH_DB: createGraphDB([
-      { id: "n1", type: "concept", label: "A", properties: null, source_document_id: null, created_at: "t1" },
-    ]),
-  });
+test("POST /v1/graphs/:graphId/nodes rejects a duplicate client-supplied id with 409", async () => {
+  const db = createGraphDB();
+  seedGraph(db, { id: "g1", owners: ["user-1"] });
+  db._nodes.push({ id: "n1", graph_id: "g1", type: "concept", label: "A", properties: null, source_document_id: null, created_at: "t1" });
+  const { post } = harness({ GRAPH_DB: db });
   const headers = await authHeader();
 
-  const { status, body } = await post("/v1/nodes", { id: "n1", type: "concept", label: "B" }, headers);
+  const { status, body } = await post("/v1/graphs/g1/nodes", { id: "n1", type: "concept", label: "B" }, headers);
   assert.equal(status, 409);
   assert.match(body.error.message, /already exists/);
 });
 
-test("GET /v1/nodes/:id returns a node or 404", async () => {
-  const { get } = harness({
-    GRAPH_DB: createGraphDB([
-      { id: "n1", type: "concept", label: "Photosynthesis", properties: null, source_document_id: null, created_at: "t1" },
-    ]),
-  });
+test("GET /v1/graphs/:graphId/nodes/:id returns a node or 404, and does not leak nodes from other graphs", async () => {
+  const db = createGraphDB();
+  seedGraph(db, { id: "g1", owners: ["user-1"] });
+  seedGraph(db, { id: "g2", owners: ["user-1"] });
+  db._nodes.push({ id: "n1", graph_id: "g1", type: "concept", label: "Photosynthesis", properties: null, source_document_id: null, created_at: "t1" });
+  const { get } = harness({ GRAPH_DB: db });
   const headers = await authHeader();
 
-  const found = await get("/v1/nodes/n1", headers);
+  const found = await get("/v1/graphs/g1/nodes/n1", headers);
   assert.equal(found.status, 200);
   assert.equal(found.body.data.label, "Photosynthesis");
 
-  const notFound = await get("/v1/nodes/missing", headers);
+  const notFound = await get("/v1/graphs/g1/nodes/missing", headers);
   assert.equal(notFound.status, 404);
+
+  const wrongGraph = await get("/v1/graphs/g2/nodes/n1", headers);
+  assert.equal(wrongGraph.status, 404, "a node from g1 must not be reachable through g2, even with owner access to both");
 });
 
-test("GET /v1/nodes?type=X lists nodes of a given type", async () => {
-  const { get } = harness({
-    GRAPH_DB: createGraphDB([
-      { id: "n1", type: "concept", label: "A", properties: null, source_document_id: null, created_at: "t1" },
-      { id: "n2", type: "document", label: "B", properties: null, source_document_id: null, created_at: "t2" },
-    ]),
-  });
+test("GET /v1/graphs/:graphId/nodes?type=X lists nodes of a given type scoped to that graph", async () => {
+  const db = createGraphDB();
+  seedGraph(db, { id: "g1", owners: ["user-1"] });
+  seedGraph(db, { id: "g2", owners: ["user-1"] });
+  db._nodes.push(
+    { id: "n1", graph_id: "g1", type: "concept", label: "A", properties: null, source_document_id: null, created_at: "t1" },
+    { id: "n2", graph_id: "g2", type: "concept", label: "B", properties: null, source_document_id: null, created_at: "t2" }
+  );
+  const { get } = harness({ GRAPH_DB: db });
   const headers = await authHeader();
 
-  const { status, body } = await get("/v1/nodes?type=concept", headers);
+  const { status, body } = await get("/v1/graphs/g1/nodes?type=concept", headers);
   assert.equal(status, 200);
   assert.equal(body.count, 1);
   assert.equal(body.data[0].id, "n1");
 });
 
-test("POST /v1/edges creates a relation between two existing nodes", async () => {
-  const { post, db } = harness({
-    GRAPH_DB: createGraphDB([
-      { id: "n1", type: "concept", label: "A", properties: null, source_document_id: null, created_at: "t1" },
-      { id: "n2", type: "concept", label: "B", properties: null, source_document_id: null, created_at: "t2" },
-    ]),
-  });
+test("POST /v1/graphs/:graphId/edges creates a relation between two existing nodes in the graph", async () => {
+  const db = createGraphDB();
+  seedGraph(db, { id: "g1", owners: ["user-1"] });
+  db._nodes.push(
+    { id: "n1", graph_id: "g1", type: "concept", label: "A", properties: null, source_document_id: null, created_at: "t1" },
+    { id: "n2", graph_id: "g1", type: "concept", label: "B", properties: null, source_document_id: null, created_at: "t2" }
+  );
+  const { post } = harness({ GRAPH_DB: db });
   const headers = await authHeader();
 
   const { status, body } = await post(
-    "/v1/edges",
+    "/v1/graphs/g1/edges",
     { from_node_id: "n1", to_node_id: "n2", relation: "related_to" },
     headers
   );
@@ -268,16 +402,15 @@ test("POST /v1/edges creates a relation between two existing nodes", async () =>
   assert.equal(db._edges.length, 1);
 });
 
-test("POST /v1/edges rejects a reference to a non-existent node with 400", async () => {
-  const { post } = harness({
-    GRAPH_DB: createGraphDB([
-      { id: "n1", type: "concept", label: "A", properties: null, source_document_id: null, created_at: "t1" },
-    ]),
-  });
+test("POST /v1/graphs/:graphId/edges rejects a reference to a non-existent node with 400", async () => {
+  const db = createGraphDB();
+  seedGraph(db, { id: "g1", owners: ["user-1"] });
+  db._nodes.push({ id: "n1", graph_id: "g1", type: "concept", label: "A", properties: null, source_document_id: null, created_at: "t1" });
+  const { post } = harness({ GRAPH_DB: db });
   const headers = await authHeader();
 
   const { status, body } = await post(
-    "/v1/edges",
+    "/v1/graphs/g1/edges",
     { from_node_id: "n1", to_node_id: "missing", relation: "related_to" },
     headers
   );
@@ -286,20 +419,40 @@ test("POST /v1/edges rejects a reference to a non-existent node with 400", async
   assert.match(body.error.message, /to_node_id/);
 });
 
-test("POST /v1/edges rejects a duplicate from/to/relation triple with 409", async () => {
-  const { post } = harness({
-    GRAPH_DB: createGraphDB(
-      [
-        { id: "n1", type: "concept", label: "A", properties: null, source_document_id: null, created_at: "t1" },
-        { id: "n2", type: "concept", label: "B", properties: null, source_document_id: null, created_at: "t2" },
-      ],
-      [{ id: "e1", from_node_id: "n1", to_node_id: "n2", relation: "related_to", properties: null, created_at: "t1" }]
-    ),
-  });
+test("POST /v1/graphs/:graphId/edges rejects a node that belongs to a different graph with 400", async () => {
+  const db = createGraphDB();
+  seedGraph(db, { id: "g1", owners: ["user-1"] });
+  seedGraph(db, { id: "g2", owners: ["user-1"] });
+  db._nodes.push(
+    { id: "n1", graph_id: "g1", type: "concept", label: "A", properties: null, source_document_id: null, created_at: "t1" },
+    { id: "n2", graph_id: "g2", type: "concept", label: "B", properties: null, source_document_id: null, created_at: "t2" }
+  );
+  const { post } = harness({ GRAPH_DB: db });
   const headers = await authHeader();
 
   const { status, body } = await post(
-    "/v1/edges",
+    "/v1/graphs/g1/edges",
+    { from_node_id: "n1", to_node_id: "n2", relation: "related_to" },
+    headers
+  );
+
+  assert.equal(status, 400);
+  assert.match(body.error.message, /to_node_id/);
+});
+
+test("POST /v1/graphs/:graphId/edges rejects a duplicate from/to/relation triple with 409", async () => {
+  const db = createGraphDB();
+  seedGraph(db, { id: "g1", owners: ["user-1"] });
+  db._nodes.push(
+    { id: "n1", graph_id: "g1", type: "concept", label: "A", properties: null, source_document_id: null, created_at: "t1" },
+    { id: "n2", graph_id: "g1", type: "concept", label: "B", properties: null, source_document_id: null, created_at: "t2" }
+  );
+  db._edges.push({ id: "e1", from_node_id: "n1", to_node_id: "n2", relation: "related_to", properties: null, created_at: "t1" });
+  const { post } = harness({ GRAPH_DB: db });
+  const headers = await authHeader();
+
+  const { status, body } = await post(
+    "/v1/graphs/g1/edges",
     { from_node_id: "n1", to_node_id: "n2", relation: "related_to" },
     headers
   );
@@ -307,23 +460,22 @@ test("POST /v1/edges rejects a duplicate from/to/relation triple with 409", asyn
   assert.match(body.error.message, /already exists/);
 });
 
-test("GET /v1/nodes/:id/neighbors lists connected nodes with relation info", async () => {
-  const { get } = harness({
-    GRAPH_DB: createGraphDB(
-      [
-        { id: "n1", type: "concept", label: "A", properties: null, source_document_id: null, created_at: "t1" },
-        { id: "n2", type: "concept", label: "B", properties: null, source_document_id: null, created_at: "t2" },
-        { id: "n3", type: "concept", label: "C", properties: null, source_document_id: null, created_at: "t3" },
-      ],
-      [
-        { id: "e1", from_node_id: "n1", to_node_id: "n2", relation: "related_to", properties: null, created_at: "t1" },
-        { id: "e2", from_node_id: "n3", to_node_id: "n1", relation: "references", properties: null, created_at: "t2" },
-      ]
-    ),
-  });
+test("GET /v1/graphs/:graphId/nodes/:id/neighbors lists connected nodes with relation info", async () => {
+  const db = createGraphDB();
+  seedGraph(db, { id: "g1", owners: ["user-1"] });
+  db._nodes.push(
+    { id: "n1", graph_id: "g1", type: "concept", label: "A", properties: null, source_document_id: null, created_at: "t1" },
+    { id: "n2", graph_id: "g1", type: "concept", label: "B", properties: null, source_document_id: null, created_at: "t2" },
+    { id: "n3", graph_id: "g1", type: "concept", label: "C", properties: null, source_document_id: null, created_at: "t3" }
+  );
+  db._edges.push(
+    { id: "e1", from_node_id: "n1", to_node_id: "n2", relation: "related_to", properties: null, created_at: "t1" },
+    { id: "e2", from_node_id: "n3", to_node_id: "n1", relation: "references", properties: null, created_at: "t2" }
+  );
+  const { get } = harness({ GRAPH_DB: db });
   const headers = await authHeader();
 
-  const { status, body } = await get("/v1/nodes/n1/neighbors", headers);
+  const { status, body } = await get("/v1/graphs/g1/nodes/n1/neighbors", headers);
 
   assert.equal(status, 200);
   assert.equal(body.count, 2);
@@ -334,33 +486,35 @@ test("GET /v1/nodes/:id/neighbors lists connected nodes with relation info", asy
   assert.equal(byNeighbor.n3.relation, "references");
 });
 
-test("GET /v1/nodes/:id/relations?to=:otherId lists direct relations between two nodes", async () => {
-  const { get } = harness({
-    GRAPH_DB: createGraphDB(
-      [
-        { id: "n1", type: "concept", label: "A", properties: null, source_document_id: null, created_at: "t1" },
-        { id: "n2", type: "concept", label: "B", properties: null, source_document_id: null, created_at: "t2" },
-      ],
-      [{ id: "e1", from_node_id: "n1", to_node_id: "n2", relation: "related_to", properties: null, created_at: "t1" }]
-    ),
-  });
+test("GET /v1/graphs/:graphId/nodes/:id/relations?to=:otherId lists direct relations between two nodes", async () => {
+  const db = createGraphDB();
+  seedGraph(db, { id: "g1", owners: ["user-1"] });
+  db._nodes.push(
+    { id: "n1", graph_id: "g1", type: "concept", label: "A", properties: null, source_document_id: null, created_at: "t1" },
+    { id: "n2", graph_id: "g1", type: "concept", label: "B", properties: null, source_document_id: null, created_at: "t2" }
+  );
+  db._edges.push({ id: "e1", from_node_id: "n1", to_node_id: "n2", relation: "related_to", properties: null, created_at: "t1" });
+  const { get } = harness({ GRAPH_DB: db });
   const headers = await authHeader();
 
-  const { status, body } = await get("/v1/nodes/n1/relations?to=n2", headers);
+  const { status, body } = await get("/v1/graphs/g1/nodes/n1/relations?to=n2", headers);
   assert.equal(status, 200);
   assert.equal(body.count, 1);
   assert.equal(body.data[0].relation, "related_to");
 
-  const missingParam = await get("/v1/nodes/n1/relations", headers);
+  const missingParam = await get("/v1/graphs/g1/nodes/n1/relations", headers);
   assert.equal(missingParam.status, 400);
+
+  const missingOtherNode = await get("/v1/graphs/g1/nodes/n1/relations?to=missing", headers);
+  assert.equal(missingOtherNode.status, 404);
 });
 
 test("graph routes fail closed when GRAPH_DB is not configured", async () => {
   const { get, post } = harness({ GRAPH_DB: null });
   const headers = await authHeader();
 
-  assert.equal((await get("/v1/nodes?type=concept", headers)).status, 500);
-  assert.equal((await post("/v1/nodes", { type: "concept", label: "A" }, headers)).status, 500);
+  assert.equal((await get("/v1/graphs/g1/nodes?type=concept", headers)).status, 500);
+  assert.equal((await post("/v1/graphs/g1/nodes", { type: "concept", label: "A" }, headers)).status, 500);
 });
 
 test("unknown routes return 404", async () => {

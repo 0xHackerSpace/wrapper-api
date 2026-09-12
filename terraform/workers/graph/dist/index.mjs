@@ -127,10 +127,21 @@ function parseProperties(raw) {
     return null;
   }
 }
+function mapGraphRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    name: row.name,
+    created_by: row.created_by,
+    created_at: row.created_at,
+    ...row.role !== void 0 ? { role: row.role } : {}
+  };
+}
 function mapNodeRow(row) {
   if (!row) return null;
   return {
     id: row.id,
+    graph_id: row.graph_id,
     type: row.type,
     label: row.label,
     properties: parseProperties(row.properties),
@@ -151,21 +162,79 @@ function mapEdgeRow(row) {
     updated_at: row.updated_at
   };
 }
-async function getNodeById(db, id) {
+async function createGraph(db, { id, name, createdBy }) {
   if (!db) {
     throw new Error("Database not configured");
   }
-  const row = await db.prepare("SELECT id, type, label, properties, source_document_id, created_at, updated_at FROM nodes WHERE id = ?").bind(id).first();
+  if (!name) {
+    throw new ValidationError("Missing required field: name");
+  }
+  const graphId = id || crypto.randomUUID();
+  const existing = await getGraphById(db, graphId);
+  if (existing) {
+    throw new ConflictError("Graph with this id already exists");
+  }
+  let result;
+  try {
+    result = await db.prepare("INSERT INTO graphs (id, name, created_by) VALUES (?, ?, ?)").bind(graphId, name, createdBy).run();
+  } catch (error2) {
+    if (isUniqueConstraintError(error2)) {
+      throw new ConflictError("Graph with this id already exists");
+    }
+    throw error2;
+  }
+  if (!result.success) {
+    throw new Error("Failed to create graph");
+  }
+  await db.prepare("INSERT INTO graph_access (id, graph_id, user_id, role) VALUES (?, ?, ?, ?)").bind(crypto.randomUUID(), graphId, createdBy, "owner").run();
+  return getGraphById(db, graphId);
+}
+async function getGraphById(db, id) {
+  if (!db) {
+    throw new Error("Database not configured");
+  }
+  const row = await db.prepare("SELECT id, name, created_by, created_at FROM graphs WHERE id = ?").bind(id).first();
+  return mapGraphRow(row);
+}
+async function listGraphsForUser(db, userId) {
+  if (!db) {
+    throw new Error("Database not configured");
+  }
+  const results = await db.prepare(
+    `SELECT g.id, g.name, g.created_by, g.created_at, ga.role
+       FROM graphs g
+       JOIN graph_access ga ON ga.graph_id = g.id
+       WHERE ga.user_id = ?
+       ORDER BY g.created_at`
+  ).bind(userId).all();
+  return (results.results || []).map(mapGraphRow);
+}
+async function getGraphAccess(db, graphId, userId) {
+  if (!db) {
+    throw new Error("Database not configured");
+  }
+  const row = await db.prepare("SELECT role FROM graph_access WHERE graph_id = ? AND user_id = ?").bind(graphId, userId).first();
+  return row?.role ?? null;
+}
+async function getNodeById(db, graphId, id) {
+  if (!db) {
+    throw new Error("Database not configured");
+  }
+  const row = await db.prepare(
+    "SELECT id, graph_id, type, label, properties, source_document_id, created_at, updated_at FROM nodes WHERE id = ? AND graph_id = ?"
+  ).bind(id, graphId).first();
   return mapNodeRow(row);
 }
-async function listNodesByType(db, type) {
+async function listNodesByType(db, graphId, type) {
   if (!db) {
     throw new Error("Database not configured");
   }
-  const results = await db.prepare("SELECT id, type, label, properties, source_document_id, created_at, updated_at FROM nodes WHERE type = ? ORDER BY created_at").bind(type).all();
+  const results = await db.prepare(
+    "SELECT id, graph_id, type, label, properties, source_document_id, created_at, updated_at FROM nodes WHERE graph_id = ? AND type = ? ORDER BY created_at"
+  ).bind(graphId, type).all();
   return (results.results || []).map(mapNodeRow);
 }
-async function createNode(db, { id, type, label, properties, source_document_id }) {
+async function createNode(db, graphId, { id, type, label, properties, source_document_id }) {
   if (!db) {
     throw new Error("Database not configured");
   }
@@ -176,15 +245,15 @@ async function createNode(db, { id, type, label, properties, source_document_id 
     throw new ValidationError("Missing required field: label");
   }
   const nodeId = id || crypto.randomUUID();
-  const existing = await getNodeById(db, nodeId);
+  const existing = await getNodeById(db, graphId, nodeId);
   if (existing) {
     throw new ConflictError("Node with this id already exists");
   }
   let result;
   try {
     result = await db.prepare(
-      "INSERT INTO nodes (id, type, label, properties, source_document_id) VALUES (?, ?, ?, ?, ?)"
-    ).bind(nodeId, type, label, serializeProperties(properties), source_document_id || null).run();
+      "INSERT INTO nodes (id, graph_id, type, label, properties, source_document_id) VALUES (?, ?, ?, ?, ?, ?)"
+    ).bind(nodeId, graphId, type, label, serializeProperties(properties), source_document_id || null).run();
   } catch (error2) {
     if (isUniqueConstraintError(error2)) {
       throw new ConflictError("Node with this id already exists");
@@ -194,9 +263,9 @@ async function createNode(db, { id, type, label, properties, source_document_id 
   if (!result.success) {
     throw new Error("Failed to create node");
   }
-  return getNodeById(db, nodeId);
+  return getNodeById(db, graphId, nodeId);
 }
-async function getNeighbors(db, nodeId) {
+async function getNeighbors(db, graphId, nodeId) {
   if (!db) {
     throw new Error("Database not configured");
   }
@@ -207,9 +276,9 @@ async function getNeighbors(db, nodeId) {
               n.properties AS neighbor_properties, n.source_document_id AS neighbor_source_document_id
        FROM edges e
        JOIN nodes n ON n.id = (CASE WHEN e.from_node_id = ? THEN e.to_node_id ELSE e.from_node_id END)
-       WHERE e.from_node_id = ? OR e.to_node_id = ?
+       WHERE (e.from_node_id = ? OR e.to_node_id = ?) AND n.graph_id = ?
        ORDER BY e.created_at`
-  ).bind(nodeId, nodeId, nodeId).all();
+  ).bind(nodeId, nodeId, nodeId, graphId).all();
   return (results.results || []).map((row) => ({
     edge_id: row.edge_id,
     relation: row.relation,
@@ -229,14 +298,14 @@ async function getRelationsBetween(db, nodeId, otherId) {
     throw new Error("Database not configured");
   }
   const results = await db.prepare(
-    `SELECT id, from_node_id, to_node_id, relation, properties, created_at
+    `SELECT id, from_node_id, to_node_id, relation, properties, created_at, updated_at
        FROM edges
        WHERE (from_node_id = ? AND to_node_id = ?) OR (from_node_id = ? AND to_node_id = ?)
        ORDER BY created_at`
   ).bind(nodeId, otherId, otherId, nodeId).all();
   return (results.results || []).map(mapEdgeRow);
 }
-async function createEdge(db, { id, from_node_id, to_node_id, relation, properties }) {
+async function createEdge(db, graphId, { id, from_node_id, to_node_id, relation, properties }) {
   if (!db) {
     throw new Error("Database not configured");
   }
@@ -249,13 +318,13 @@ async function createEdge(db, { id, from_node_id, to_node_id, relation, properti
   if (!relation) {
     throw new ValidationError("Missing required field: relation");
   }
-  const fromNode = await getNodeById(db, from_node_id);
+  const fromNode = await getNodeById(db, graphId, from_node_id);
   if (!fromNode) {
-    throw new ValidationError("from_node_id does not reference an existing node");
+    throw new ValidationError("from_node_id does not reference an existing node in this graph");
   }
-  const toNode = await getNodeById(db, to_node_id);
+  const toNode = await getNodeById(db, graphId, to_node_id);
   if (!toNode) {
-    throw new ValidationError("to_node_id does not reference an existing node");
+    throw new ValidationError("to_node_id does not reference an existing node in this graph");
   }
   const duplicate = await db.prepare("SELECT id FROM edges WHERE from_node_id = ? AND to_node_id = ? AND relation = ?").bind(from_node_id, to_node_id, relation).first();
   if (duplicate) {
@@ -281,6 +350,7 @@ async function createEdge(db, { id, from_node_id, to_node_id, relation, properti
 }
 
 // terraform/workers/graph/src/index.mjs
+var ROLE_RANK = { viewer: 1, editor: 2, owner: 3 };
 var index_default = {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -288,28 +358,24 @@ var index_default = {
     try {
       if (pathname === "/health") return handleHealth(env);
       if (pathname === "/" || pathname === "/v1") return handleInfo(env);
-      const nodeMatch = pathname.match(/^\/v1\/nodes(?:\/([^/]+)(?:\/(neighbors|relations))?)?$/);
-      if (nodeMatch) {
-        const nodeId = nodeMatch[1];
-        const subresource = nodeMatch[2];
-        if (!nodeId && pathname === "/v1/nodes" && request.method === "GET") {
-          return await handleListNodes(request, env, url);
+      if (pathname === "/v1/graphs" && request.method === "POST") return await handleCreateGraph(request, env);
+      if (pathname === "/v1/graphs" && request.method === "GET") return await handleListGraphs(request, env);
+      const graphMatch = pathname.match(/^\/v1\/graphs\/([^/]+)(?:\/(nodes|edges)(?:\/([^/]+)(?:\/(neighbors|relations))?)?)?$/);
+      if (graphMatch) {
+        const graphId = graphMatch[1];
+        const resource = graphMatch[2];
+        const resourceId = graphMatch[3];
+        const subresource = graphMatch[4];
+        if (resource === "nodes") {
+          if (!resourceId && request.method === "GET") return await handleListNodes(request, env, graphId, url);
+          if (!resourceId && request.method === "POST") return await handleCreateNode(request, env, graphId);
+          if (resourceId && !subresource && request.method === "GET") return await handleGetNode(request, env, graphId, resourceId);
+          if (resourceId && subresource === "neighbors" && request.method === "GET") return await handleGetNeighbors(request, env, graphId, resourceId);
+          if (resourceId && subresource === "relations" && request.method === "GET") return await handleGetRelations(request, env, graphId, resourceId, url);
         }
-        if (!nodeId && pathname === "/v1/nodes" && request.method === "POST") {
-          return await handleCreateNode(request, env);
+        if (resource === "edges" && !resourceId && request.method === "POST") {
+          return await handleCreateEdge(request, env, graphId);
         }
-        if (nodeId && !subresource && request.method === "GET") {
-          return await handleGetNode(request, env, nodeId);
-        }
-        if (nodeId && subresource === "neighbors" && request.method === "GET") {
-          return await handleGetNeighbors(request, env, nodeId);
-        }
-        if (nodeId && subresource === "relations" && request.method === "GET") {
-          return await handleGetRelations(request, env, nodeId, url);
-        }
-      }
-      if (pathname === "/v1/edges" && request.method === "POST") {
-        return await handleCreateEdge(request, env);
       }
       return notFound("Endpoint not found");
     } catch (error2) {
@@ -338,17 +404,19 @@ function handleInfo(env) {
   return json({
     service: "graph",
     version: "1.0.0",
-    description: "Knowledge graph API: entities (nodes) and relations (edges) extracted from documents",
+    description: "Knowledge graph API: isolated graphs of entities (nodes) and relations (edges) extracted from documents",
     environment: env.ENVIRONMENT ?? "unknown",
     endpoints: {
       health: "GET /health",
       info: "GET /v1",
-      create_node: "POST /v1/nodes (requires auth)",
-      list_nodes: "GET /v1/nodes?type=X (requires auth)",
-      get_node: "GET /v1/nodes/:id (requires auth)",
-      create_edge: "POST /v1/edges (requires auth)",
-      neighbors: "GET /v1/nodes/:id/neighbors (requires auth)",
-      relations: "GET /v1/nodes/:id/relations?to=:otherId (requires auth)"
+      create_graph: "POST /v1/graphs (requires auth, creator becomes owner)",
+      list_graphs: "GET /v1/graphs (requires auth, lists graphs you have access to)",
+      create_node: "POST /v1/graphs/:graphId/nodes (requires auth + editor/owner access)",
+      list_nodes: "GET /v1/graphs/:graphId/nodes?type=X (requires auth + viewer+ access)",
+      get_node: "GET /v1/graphs/:graphId/nodes/:id (requires auth + viewer+ access)",
+      create_edge: "POST /v1/graphs/:graphId/edges (requires auth + editor/owner access)",
+      neighbors: "GET /v1/graphs/:graphId/nodes/:id/neighbors (requires auth + viewer+ access)",
+      relations: "GET /v1/graphs/:graphId/nodes/:id/relations?to=:otherId (requires auth + viewer+ access)"
     },
     authentication: {
       type: "JWT Bearer Token",
@@ -356,14 +424,45 @@ function handleInfo(env) {
     }
   });
 }
-async function handleCreateNode(request, env) {
-  await requirePermission(request, env, "graph:write");
+async function requireGraphMembership(env, graphId, userId, minRole) {
+  const graph = await getGraphById(env.GRAPH_DB, graphId);
+  if (!graph) {
+    return null;
+  }
+  const role = await getGraphAccess(env.GRAPH_DB, graphId, userId);
+  if (!role || ROLE_RANK[role] < ROLE_RANK[minRole]) {
+    throw new AuthError(403, "No access to this graph");
+  }
+  return graph;
+}
+async function handleCreateGraph(request, env) {
+  const payload = await requirePermission(request, env, "graph:write");
   if (!env.GRAPH_DB) {
     return internalError("Graph database not configured");
   }
   const body = await request.json();
+  const { id, name } = body;
+  const graph = await createGraph(env.GRAPH_DB, { id: id || null, name, createdBy: payload.sub });
+  return json({ success: true, data: graph }, 201);
+}
+async function handleListGraphs(request, env) {
+  const payload = await requirePermission(request, env, "graph:read");
+  if (!env.GRAPH_DB) {
+    return internalError("Graph database not configured");
+  }
+  const graphs = await listGraphsForUser(env.GRAPH_DB, payload.sub);
+  return json({ success: true, data: graphs, count: graphs.length });
+}
+async function handleCreateNode(request, env, graphId) {
+  const payload = await requirePermission(request, env, "graph:write");
+  if (!env.GRAPH_DB) {
+    return internalError("Graph database not configured");
+  }
+  const graph = await requireGraphMembership(env, graphId, payload.sub, "editor");
+  if (!graph) return notFound("Graph not found");
+  const body = await request.json();
   const { id, type, label, properties, source_document_id } = body;
-  const node = await createNode(env.GRAPH_DB, {
+  const node = await createNode(env.GRAPH_DB, graphId, {
     id: id || null,
     type,
     label,
@@ -372,65 +471,79 @@ async function handleCreateNode(request, env) {
   });
   return json({ success: true, data: node }, 201);
 }
-async function handleListNodes(request, env, url) {
-  await requirePermission(request, env, "graph:read");
+async function handleListNodes(request, env, graphId, url) {
+  const payload = await requirePermission(request, env, "graph:read");
   if (!env.GRAPH_DB) {
     return internalError("Graph database not configured");
   }
+  const graph = await requireGraphMembership(env, graphId, payload.sub, "viewer");
+  if (!graph) return notFound("Graph not found");
   const type = url.searchParams.get("type");
   if (!type) {
     return badRequest("Missing required query parameter: type");
   }
-  const nodes = await listNodesByType(env.GRAPH_DB, type);
+  const nodes = await listNodesByType(env.GRAPH_DB, graphId, type);
   return json({ success: true, data: nodes, count: nodes.length });
 }
-async function handleGetNode(request, env, nodeId) {
-  await requirePermission(request, env, "graph:read");
+async function handleGetNode(request, env, graphId, nodeId) {
+  const payload = await requirePermission(request, env, "graph:read");
   if (!env.GRAPH_DB) {
     return internalError("Graph database not configured");
   }
-  const node = await getNodeById(env.GRAPH_DB, nodeId);
+  const graph = await requireGraphMembership(env, graphId, payload.sub, "viewer");
+  if (!graph) return notFound("Graph not found");
+  const node = await getNodeById(env.GRAPH_DB, graphId, nodeId);
   if (!node) {
     return notFound("Node not found");
   }
   return json({ success: true, data: node });
 }
-async function handleGetNeighbors(request, env, nodeId) {
-  await requirePermission(request, env, "graph:read");
+async function handleGetNeighbors(request, env, graphId, nodeId) {
+  const payload = await requirePermission(request, env, "graph:read");
   if (!env.GRAPH_DB) {
     return internalError("Graph database not configured");
   }
-  const node = await getNodeById(env.GRAPH_DB, nodeId);
+  const graph = await requireGraphMembership(env, graphId, payload.sub, "viewer");
+  if (!graph) return notFound("Graph not found");
+  const node = await getNodeById(env.GRAPH_DB, graphId, nodeId);
   if (!node) {
     return notFound("Node not found");
   }
-  const neighbors = await getNeighbors(env.GRAPH_DB, nodeId);
+  const neighbors = await getNeighbors(env.GRAPH_DB, graphId, nodeId);
   return json({ success: true, data: neighbors, count: neighbors.length });
 }
-async function handleGetRelations(request, env, nodeId, url) {
-  await requirePermission(request, env, "graph:read");
+async function handleGetRelations(request, env, graphId, nodeId, url) {
+  const payload = await requirePermission(request, env, "graph:read");
   if (!env.GRAPH_DB) {
     return internalError("Graph database not configured");
+  }
+  const graph = await requireGraphMembership(env, graphId, payload.sub, "viewer");
+  if (!graph) return notFound("Graph not found");
+  const node = await getNodeById(env.GRAPH_DB, graphId, nodeId);
+  if (!node) {
+    return notFound("Node not found");
   }
   const otherId = url.searchParams.get("to");
   if (!otherId) {
     return badRequest("Missing required query parameter: to");
   }
-  const node = await getNodeById(env.GRAPH_DB, nodeId);
-  if (!node) {
-    return notFound("Node not found");
+  const otherNode = await getNodeById(env.GRAPH_DB, graphId, otherId);
+  if (!otherNode) {
+    return notFound("to node not found in this graph");
   }
   const relations = await getRelationsBetween(env.GRAPH_DB, nodeId, otherId);
   return json({ success: true, data: relations, count: relations.length });
 }
-async function handleCreateEdge(request, env) {
-  await requirePermission(request, env, "graph:write");
+async function handleCreateEdge(request, env, graphId) {
+  const payload = await requirePermission(request, env, "graph:write");
   if (!env.GRAPH_DB) {
     return internalError("Graph database not configured");
   }
+  const graph = await requireGraphMembership(env, graphId, payload.sub, "editor");
+  if (!graph) return notFound("Graph not found");
   const body = await request.json();
   const { id, from_node_id, to_node_id, relation, properties } = body;
-  const edge = await createEdge(env.GRAPH_DB, {
+  const edge = await createEdge(env.GRAPH_DB, graphId, {
     id: id || null,
     from_node_id,
     to_node_id,

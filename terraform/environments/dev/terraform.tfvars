@@ -32,11 +32,12 @@ d1_databases = {
     name                  = "dev-graph"
     primary_location_hint = "wnam"
     # run_migrations = true: aplicado automaticamente pelo terraform_data
-    # do modulo d1 durante o apply (dev-graph e um banco novo, sem dados
-    # de producao em risco).
+    # do modulo d1 durante o apply. 0007 ja criou nodes/edges com dados;
+    # 0010 e ALTER-based e faz backfill para nao perder linhas existentes.
     run_migrations = true
     migrations = [
-      "migrations/0007_create_graph_nodes_and_edges.sql"
+      "migrations/0007_create_graph_nodes_and_edges.sql",
+      "migrations/0010_add_graph_containers_and_access.sql"
     ]
   }
 }

@@ -6,6 +6,7 @@
 @baseUrlRag=https://dev-rag.0xhackerspace.workers.dev
 @baseUrlAI=https://dev-ai.0xhackerspace.workers.dev
 @baseUrlGraph=https://dev-graph.0xhackerspace.workers.dev
+@graphId=COLE_AQUI_O_ID_RETORNADO_POR_POST_/v1/graphs
 @jwtToken=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIzMjhmMWE3Ny1hNGEzLTRlYTctOWNjMS03OTY1NzEyNTJhNzEiLCJ1c2VybmFtZSI6Imlhbm9saXYiLCJ0eXBlIjoiYWNjZXNzIiwicGVybWlzc2lvbnMiOlsiYXBpOmFjY2VzcyIsImFwaTphY2Nlc3MiLCJhcGk6YWNjZXNzIiwiYXBpOmFjY2VzcyIsImFwaTphY2Nlc3MiLCJhdXRoOmxvZ2luIiwiYXV0aDpsb2dpbiIsImF1dGg6bG9naW4iLCJhdXRoOmxvZ2luIiwiYXV0aDpsb2dpbiIsImF1dGg6bG9naW4iLCJhdXRoOmxvZ2luIiwiYXV0aDpsb2dpbiIsImF1dGg6bG9nb3V0IiwiYXV0aDpsb2dvdXQiLCJhdXRoOmxvZ291dCIsImF1dGg6bG9nb3V0IiwiYXV0aDpsb2dvdXQiLCJhdXRoOmxvZ291dCIsImF1dGg6bG9nb3V0IiwiZ3JhcGg6cmVhZCIsImdyYXBoOnJlYWQiLCJncmFwaDpyZWFkIiwiZ3JhcGg6d3JpdGUiLCJncmFwaDp3cml0ZSIsImluZ3JlZGllbnQ6Y3JlYXRlIiwiaW5ncmVkaWVudDpjcmVhdGUiLCJpbmdyZWRpZW50OmRlbGV0ZSIsImluZ3JlZGllbnQ6ZGVsZXRlIiwiaW5ncmVkaWVudDpyZWFkIiwiaW5ncmVkaWVudDpyZWFkIiwiaW5ncmVkaWVudDpyZWFkIiwiaW5ncmVkaWVudDp1cGRhdGUiLCJpbmdyZWRpZW50OnVwZGF0ZSIsInBlcm1pc3Npb246Y3JlYXRlIiwicGVybWlzc2lvbjpkZWxldGUiLCJwZXJtaXNzaW9uOnJlYWQiLCJwZXJtaXNzaW9uOnVwZGF0ZSIsInByb2ZpbGU6Y3JlYXRlIiwicHJvZmlsZTpkZWxldGUiLCJwcm9maWxlOnJlYWQiLCJwcm9maWxlOnVwZGF0ZSIsInJhZzppbmdlc3QiLCJyYWc6aW5nZXN0IiwicmFnOnF1ZXJ5IiwicmFnOnF1ZXJ5IiwicmFnOnF1ZXJ5IiwicmFnOnF1ZXJ5IiwidXNlcjpjcmVhdGUiLCJ1c2VyOmRlbGV0ZSIsInVzZXI6cmVhZCIsInVzZXI6cmVhZCIsInVzZXI6dXBkYXRlIl0sInByb2ZpbGVzIjpbIkFkbWluIiwiQVBJIFVzZXIiLCJHcmFwaCBVc2VyIiwiR3Vlc3QiLCJJbmdyZWRpZW50IEFkbWluIiwiSW5ncmVkaWVudCBVc2VyIiwiUkFHIFVzZXIiLCJVc2VyIl0sImlhdCI6MTc4OTIwMTMxMiwiZXhwIjoxNzg5MjA0OTEyfQ.VA7SGv-bZ6Aw3uW0Ii3GJvtJnKDFLcRkiHzUtm2KODc
 
 ### ============================================
@@ -160,8 +161,26 @@ Content-Type: application/json
 ### Health check
 GET {{baseUrlGraph}}/health
 
+### --- Grafos (containers isolados) ---
+
+### Create a graph (creator automatically becomes owner)
+POST {{baseUrlGraph}}/v1/graphs
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "name": "Ingredientes"
+}
+
+### List graphs the caller has access to (owner/editor/viewer)
+GET {{baseUrlGraph}}/v1/graphs
+Authorization: Bearer {{jwtToken}}
+
+### --- Nodes e edges (sempre dentro de um grafo) ---
+### Copie o "id" retornado por POST /v1/graphs para @graphId no topo do arquivo
+
 ### Create node (entity)
-POST {{baseUrlGraph}}/v1/nodes
+POST {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes
 Content-Type: application/json
 Authorization: Bearer {{jwtToken}}
 
@@ -175,7 +194,7 @@ Authorization: Bearer {{jwtToken}}
 }
 
 ### Create another node (to link as neighbor)
-POST {{baseUrlGraph}}/v1/nodes
+POST {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes
 Content-Type: application/json
 Authorization: Bearer {{jwtToken}}
 
@@ -187,7 +206,7 @@ Authorization: Bearer {{jwtToken}}
   }
 }
 ### Create another node (to link as neighbor)
-POST {{baseUrlGraph}}/v1/nodes
+POST {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes
 Content-Type: application/json
 Authorization: Bearer {{jwtToken}}
 
@@ -200,15 +219,15 @@ Authorization: Bearer {{jwtToken}}
 }
 
 ### Get node by ID
-GET {{baseUrlGraph}}/v1/nodes/1a2b3c4d-5e6f-7g8h-9i0j-1k2l3m4n5o6p
+GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes/1a2b3c4d-5e6f-7g8h-9i0j-1k2l3m4n5o6p
 Authorization: Bearer {{jwtToken}}
 
 ### List nodes by type
-GET {{baseUrlGraph}}/v1/nodes?type=ingredient
+GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes?type=ingredient
 Authorization: Bearer {{jwtToken}}
 
 ### Create edge (relation between two nodes)
-POST {{baseUrlGraph}}/v1/edges
+POST {{baseUrlGraph}}/v1/graphs/{{graphId}}/edges
 Content-Type: application/json
 Authorization: Bearer {{jwtToken}}
 
@@ -222,17 +241,17 @@ Authorization: Bearer {{jwtToken}}
 }
 
 ### List neighbors of a node
-GET {{baseUrlGraph}}/v1/nodes/0aba4e07-e3ee-4b50-abd2-dd1f6a32e834
+GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes/0aba4e07-e3ee-4b50-abd2-dd1f6a32e834/neighbors
 Authorization: Bearer {{jwtToken}}
 
 ### Check direct relations between two nodes
-GET {{baseUrlGraph}}/v1/nodes/1a2b3c4d-5e6f-7g8h-9i0j-1k2l3m4n5o6p/relations?to=2b3c4d5e-6f7g-8h9i-0j1k-2l3m4n5o6p7q
+GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes/1a2b3c4d-5e6f-7g8h-9i0j-1k2l3m4n5o6p/relations?to=2b3c4d5e-6f7g-8h9i-0j1k-2l3m4n5o6p7q
 Authorization: Bearer {{jwtToken}}
 
 ### --- Mais casos de uso ---
 
 ### Create node with client-supplied id
-POST {{baseUrlGraph}}/v1/nodes
+POST {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes
 Content-Type: application/json
 Authorization: Bearer {{jwtToken}}
 
@@ -246,7 +265,7 @@ Authorization: Bearer {{jwtToken}}
 }
 
 ### Build a small graph: third node + second edge (Alho -[substitui]-> Cebolinha)
-POST {{baseUrlGraph}}/v1/edges
+POST {{baseUrlGraph}}/v1/graphs/{{graphId}}/edges
 Content-Type: application/json
 Authorization: Bearer {{jwtToken}}
 
@@ -260,11 +279,11 @@ Authorization: Bearer {{jwtToken}}
 }
 
 ### List neighbors after multiple edges (should include Cebola + Cebolinha, each with sua relation)
-GET {{baseUrlGraph}}/v1/nodes/0aba4e07-e3ee-4b50-abd2-dd1f6a32e834/neighbors
+GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes/0aba4e07-e3ee-4b50-abd2-dd1f6a32e834/neighbors
 Authorization: Bearer {{jwtToken}}
 
 ### Node from a RAG-ingested document (source_document_id linka de volta ao rag-worker)
-POST {{baseUrlGraph}}/v1/nodes
+POST {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes
 Content-Type: application/json
 Authorization: Bearer {{jwtToken}}
 
@@ -275,13 +294,13 @@ Authorization: Bearer {{jwtToken}}
 }
 
 ### List nodes by type "concept"
-GET {{baseUrlGraph}}/v1/nodes?type=concept
+GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes?type=concept
 Authorization: Bearer {{jwtToken}}
 
 ### --- Casos de erro ---
 
 ### Missing auth token on a protected route (expect 401)
-POST {{baseUrlGraph}}/v1/nodes
+POST {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes
 Content-Type: application/json
 
 {
@@ -290,11 +309,11 @@ Content-Type: application/json
 }
 
 ### Invalid/expired token (expect 401)
-GET {{baseUrlGraph}}/v1/nodes?type=ingredient
+GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes?type=ingredient
 Authorization: Bearer token-invalido
 
 ### Create node without required field "label" (expect 400, ValidationError)
-POST {{baseUrlGraph}}/v1/nodes
+POST {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes
 Content-Type: application/json
 Authorization: Bearer {{jwtToken}}
 
@@ -303,15 +322,15 @@ Authorization: Bearer {{jwtToken}}
 }
 
 ### List nodes without required "type" query param (expect 400)
-GET {{baseUrlGraph}}/v1/nodes
+GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes
 Authorization: Bearer {{jwtToken}}
 
 ### Get a node that doesn't exist (expect 404)
-GET {{baseUrlGraph}}/v1/nodes/00000000-0000-0000-0000-000000000000
+GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes/00000000-0000-0000-0000-000000000000
 Authorization: Bearer {{jwtToken}}
 
 ### Create edge pointing to a node that doesn't exist (expect 400, ValidationError)
-POST {{baseUrlGraph}}/v1/edges
+POST {{baseUrlGraph}}/v1/graphs/{{graphId}}/edges
 Content-Type: application/json
 Authorization: Bearer {{jwtToken}}
 
@@ -322,12 +341,21 @@ Authorization: Bearer {{jwtToken}}
 }
 
 ### Neighbors of a node with no relations (expect empty list)
-GET {{baseUrlGraph}}/v1/nodes/node-cebolinha/neighbors
+GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes/node-cebolinha/neighbors
 Authorization: Bearer {{jwtToken}}
 
 ### Relations between two nodes that aren't directly connected (expect empty/none)
-GET {{baseUrlGraph}}/v1/nodes/node-cebolinha/relations?to=00000000-0000-0000-0000-000000000000
+GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes/node-cebolinha/relations?to=00000000-0000-0000-0000-000000000000
 Authorization: Bearer {{jwtToken}}
+
+### Request to a graph id that doesn't exist at all (expect 404)
+GET {{baseUrlGraph}}/v1/graphs/grafo-que-nao-existe/nodes?type=ingredient
+Authorization: Bearer {{jwtToken}}
+
+### Request to a graph that exists but you have no access to (expect 403)
+### Use um @graphId real que pertença a outro usuário (crie um grafo com outro jwtToken/sub)
+GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes?type=ingredient
+Authorization: Bearer token-de-usuario-sem-acesso-a-esse-grafo
 
 ### Unknown route on graph worker (expect 404)
 GET {{baseUrlGraph}}/v1/unknown

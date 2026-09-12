@@ -23,10 +23,22 @@ function parseProperties(raw) {
   }
 }
 
+function mapGraphRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    name: row.name,
+    created_by: row.created_by,
+    created_at: row.created_at,
+    ...(row.role !== undefined ? { role: row.role } : {}),
+  };
+}
+
 function mapNodeRow(row) {
   if (!row) return null;
   return {
     id: row.id,
+    graph_id: row.graph_id,
     type: row.type,
     label: row.label,
     properties: parseProperties(row.properties),
@@ -49,33 +61,122 @@ function mapEdgeRow(row) {
   };
 }
 
-export async function getNodeById(db, id) {
+export async function createGraph(db, { id, name, createdBy }) {
+  if (!db) {
+    throw new Error("Database not configured");
+  }
+  if (!name) {
+    throw new ValidationError("Missing required field: name");
+  }
+
+  const graphId = id || crypto.randomUUID();
+
+  const existing = await getGraphById(db, graphId);
+  if (existing) {
+    throw new ConflictError("Graph with this id already exists");
+  }
+
+  let result;
+  try {
+    result = await db
+      .prepare("INSERT INTO graphs (id, name, created_by) VALUES (?, ?, ?)")
+      .bind(graphId, name, createdBy)
+      .run();
+  } catch (error) {
+    if (isUniqueConstraintError(error)) {
+      throw new ConflictError("Graph with this id already exists");
+    }
+    throw error;
+  }
+
+  if (!result.success) {
+    throw new Error("Failed to create graph");
+  }
+
+  await db
+    .prepare("INSERT INTO graph_access (id, graph_id, user_id, role) VALUES (?, ?, ?, ?)")
+    .bind(crypto.randomUUID(), graphId, createdBy, "owner")
+    .run();
+
+  return getGraphById(db, graphId);
+}
+
+export async function getGraphById(db, id) {
   if (!db) {
     throw new Error("Database not configured");
   }
 
   const row = await db
-    .prepare("SELECT id, type, label, properties, source_document_id, created_at, updated_at FROM nodes WHERE id = ?")
+    .prepare("SELECT id, name, created_by, created_at FROM graphs WHERE id = ?")
     .bind(id)
     .first();
 
-  return mapNodeRow(row);
+  return mapGraphRow(row);
 }
 
-export async function listNodesByType(db, type) {
+export async function listGraphsForUser(db, userId) {
   if (!db) {
     throw new Error("Database not configured");
   }
 
   const results = await db
-    .prepare("SELECT id, type, label, properties, source_document_id, created_at, updated_at FROM nodes WHERE type = ? ORDER BY created_at")
-    .bind(type)
+    .prepare(
+      `SELECT g.id, g.name, g.created_by, g.created_at, ga.role
+       FROM graphs g
+       JOIN graph_access ga ON ga.graph_id = g.id
+       WHERE ga.user_id = ?
+       ORDER BY g.created_at`
+    )
+    .bind(userId)
+    .all();
+
+  return (results.results || []).map(mapGraphRow);
+}
+
+export async function getGraphAccess(db, graphId, userId) {
+  if (!db) {
+    throw new Error("Database not configured");
+  }
+
+  const row = await db
+    .prepare("SELECT role FROM graph_access WHERE graph_id = ? AND user_id = ?")
+    .bind(graphId, userId)
+    .first();
+
+  return row?.role ?? null;
+}
+
+export async function getNodeById(db, graphId, id) {
+  if (!db) {
+    throw new Error("Database not configured");
+  }
+
+  const row = await db
+    .prepare(
+      "SELECT id, graph_id, type, label, properties, source_document_id, created_at, updated_at FROM nodes WHERE id = ? AND graph_id = ?"
+    )
+    .bind(id, graphId)
+    .first();
+
+  return mapNodeRow(row);
+}
+
+export async function listNodesByType(db, graphId, type) {
+  if (!db) {
+    throw new Error("Database not configured");
+  }
+
+  const results = await db
+    .prepare(
+      "SELECT id, graph_id, type, label, properties, source_document_id, created_at, updated_at FROM nodes WHERE graph_id = ? AND type = ? ORDER BY created_at"
+    )
+    .bind(graphId, type)
     .all();
 
   return (results.results || []).map(mapNodeRow);
 }
 
-export async function createNode(db, { id, type, label, properties, source_document_id }) {
+export async function createNode(db, graphId, { id, type, label, properties, source_document_id }) {
   if (!db) {
     throw new Error("Database not configured");
   }
@@ -89,7 +190,7 @@ export async function createNode(db, { id, type, label, properties, source_docum
 
   const nodeId = id || crypto.randomUUID();
 
-  const existing = await getNodeById(db, nodeId);
+  const existing = await getNodeById(db, graphId, nodeId);
   if (existing) {
     throw new ConflictError("Node with this id already exists");
   }
@@ -98,9 +199,9 @@ export async function createNode(db, { id, type, label, properties, source_docum
   try {
     result = await db
       .prepare(
-        "INSERT INTO nodes (id, type, label, properties, source_document_id) VALUES (?, ?, ?, ?, ?)"
+        "INSERT INTO nodes (id, graph_id, type, label, properties, source_document_id) VALUES (?, ?, ?, ?, ?, ?)"
       )
-      .bind(nodeId, type, label, serializeProperties(properties), source_document_id || null)
+      .bind(nodeId, graphId, type, label, serializeProperties(properties), source_document_id || null)
       .run();
   } catch (error) {
     if (isUniqueConstraintError(error)) {
@@ -113,10 +214,10 @@ export async function createNode(db, { id, type, label, properties, source_docum
     throw new Error("Failed to create node");
   }
 
-  return getNodeById(db, nodeId);
+  return getNodeById(db, graphId, nodeId);
 }
 
-export async function getNeighbors(db, nodeId) {
+export async function getNeighbors(db, graphId, nodeId) {
   if (!db) {
     throw new Error("Database not configured");
   }
@@ -129,10 +230,10 @@ export async function getNeighbors(db, nodeId) {
               n.properties AS neighbor_properties, n.source_document_id AS neighbor_source_document_id
        FROM edges e
        JOIN nodes n ON n.id = (CASE WHEN e.from_node_id = ? THEN e.to_node_id ELSE e.from_node_id END)
-       WHERE e.from_node_id = ? OR e.to_node_id = ?
+       WHERE (e.from_node_id = ? OR e.to_node_id = ?) AND n.graph_id = ?
        ORDER BY e.created_at`
     )
-    .bind(nodeId, nodeId, nodeId)
+    .bind(nodeId, nodeId, nodeId, graphId)
     .all();
 
   return (results.results || []).map((row) => ({
@@ -157,7 +258,7 @@ export async function getRelationsBetween(db, nodeId, otherId) {
 
   const results = await db
     .prepare(
-      `SELECT id, from_node_id, to_node_id, relation, properties, created_at
+      `SELECT id, from_node_id, to_node_id, relation, properties, created_at, updated_at
        FROM edges
        WHERE (from_node_id = ? AND to_node_id = ?) OR (from_node_id = ? AND to_node_id = ?)
        ORDER BY created_at`
@@ -168,7 +269,7 @@ export async function getRelationsBetween(db, nodeId, otherId) {
   return (results.results || []).map(mapEdgeRow);
 }
 
-export async function createEdge(db, { id, from_node_id, to_node_id, relation, properties }) {
+export async function createEdge(db, graphId, { id, from_node_id, to_node_id, relation, properties }) {
   if (!db) {
     throw new Error("Database not configured");
   }
@@ -183,14 +284,14 @@ export async function createEdge(db, { id, from_node_id, to_node_id, relation, p
     throw new ValidationError("Missing required field: relation");
   }
 
-  const fromNode = await getNodeById(db, from_node_id);
+  const fromNode = await getNodeById(db, graphId, from_node_id);
   if (!fromNode) {
-    throw new ValidationError("from_node_id does not reference an existing node");
+    throw new ValidationError("from_node_id does not reference an existing node in this graph");
   }
 
-  const toNode = await getNodeById(db, to_node_id);
+  const toNode = await getNodeById(db, graphId, to_node_id);
   if (!toNode) {
-    throw new ValidationError("to_node_id does not reference an existing node");
+    throw new ValidationError("to_node_id does not reference an existing node in this graph");
   }
 
   const duplicate = await db

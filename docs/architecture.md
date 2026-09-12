@@ -88,19 +88,21 @@ Permite integração fácil com SDKs OpenAI e ferramentas existentes sem depend�
 
 ## Grafo de Conhecimento (Graph Worker)
 
-Conforme [ADR 0012](decisions/0012-graph-worker-knowledge-graph.md), o Graph Worker complementa o `rag-worker` representando entidades e relações explícitas extraídas de documentos:
+Conforme [ADR 0012](decisions/0012-graph-worker-knowledge-graph.md), o Graph Worker complementa o `rag-worker` representando entidades e relações explícitas extraídas de documentos. Cada grafo é um container isolado (`graphs`): nodes/edges pertencem a exatamente um grafo, e o acesso a cada grafo é controlado por `graph_access` (papéis `owner`/`editor`/`viewer`), independente da permission RBAC `graph:read`/`graph:write` do JWT — a permission libera o uso da feature, o papel no `graph_access` libera o acesso àquele grafo específico:
 
 ```
-GET    /health                     - Health check
-GET    /v1/nodes/:id               - Buscar entidade
-GET    /v1/nodes?type=X            - Listar entidades por tipo
-POST   /v1/nodes                   - Criar entidade
-POST   /v1/edges                   - Criar relação entre duas entidades
-GET    /v1/nodes/:id/neighbors     - Listar entidades conectadas
-GET    /v1/nodes/:id/relations?to= - Relações diretas entre duas entidades
+GET    /health                                    - Health check
+POST   /v1/graphs                                 - Criar grafo (criador vira owner)
+GET    /v1/graphs                                 - Listar grafos que o usuário tem acesso
+GET    /v1/graphs/:graphId/nodes/:id              - Buscar entidade
+GET    /v1/graphs/:graphId/nodes?type=X           - Listar entidades por tipo
+POST   /v1/graphs/:graphId/nodes                  - Criar entidade (requer editor/owner)
+POST   /v1/graphs/:graphId/edges                  - Criar relação entre duas entidades (requer editor/owner)
+GET    /v1/graphs/:graphId/nodes/:id/neighbors    - Listar entidades conectadas
+GET    /v1/graphs/:graphId/nodes/:id/relations?to= - Relações diretas entre duas entidades
 ```
 
-Dados em D1 dedicado (`dev-graph`, binding `GRAPH_DB`), com tabelas `nodes`/`edges` e índices em `type`, `from_node_id`, `to_node_id`. Todas as rotas de `/v1/nodes*` e `/v1/edges*` exigem JWT Bearer, incluindo leituras.
+Dados em D1 dedicado (`dev-graph`, binding `GRAPH_DB`), com tabelas `graphs`, `graph_access`, `nodes`/`edges`. Índices em `(graph_id, type, label)`, `from_node_id`, `to_node_id`, `graph_access.user_id`. Constraints de integridade: `UNIQUE(from_node_id, to_node_id, relation)` (evita edges duplicadas), `ON DELETE CASCADE` (remover um grafo/node limpa nodes/edges dependentes), `CHECK(json_valid(properties))`. Todas as rotas exigem JWT Bearer, incluindo leituras; rotas sob `/v1/graphs/:graphId/*` exigem também que o `sub` do token tenha uma entrada em `graph_access` para aquele grafo (404 se o grafo não existe, 403 se existe mas o usuário não tem acesso).
 
 ## Gerenciamento de Secrets
 
