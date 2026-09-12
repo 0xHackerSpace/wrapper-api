@@ -5,3 +5,4 @@ node_modules/
 *.tfvars.local
 crash.log
 .env
+.claude/settings.local.json
