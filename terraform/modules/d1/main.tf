@@ -3,7 +3,7 @@ resource "cloudflare_d1_database" "this" {
   name                  = var.name
   primary_location_hint = var.primary_location_hint
   lifecycle {
-    ignore_changes = [created_at, num_tables,file_size,version,read_replication]
+    ignore_changes = [created_at, num_tables, file_size, version, read_replication]
   }
 }
 
