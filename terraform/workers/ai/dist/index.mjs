@@ -19,6 +19,8 @@ function internalError(message) {
 }
 
 // terraform/workers/ai/src/lib/ai.mjs
+var ValidationError = class extends Error {
+};
 function normalizeMessages(messages) {
   const normalized = [];
   let systemPrompt = "";
@@ -49,14 +51,10 @@ async function chatCompletion(ai, messages, options = {}) {
   try {
     const normalizedMessages = normalizeMessages(messages);
     const response = await ai.run(model, {
-      messages,
-      // messages: normalizedMessages.map(msg => ({
-      //   role: msg.role,
-      //   content: msg.content,
-      // })),
+      messages: normalizedMessages,
       temperature,
-      max_tokens
-      // // top_p,
+      max_tokens,
+      top_p
     });
     return {
       id: `chatcmpl-${Date.now()}`,
@@ -110,17 +108,17 @@ function getAvailableModels() {
 }
 function validateChatCompletionRequest(body) {
   if (!body.messages || !Array.isArray(body.messages)) {
-    throw new Error("messages is required and must be an array");
+    throw new ValidationError("messages is required and must be an array");
   }
   if (body.messages.length === 0) {
-    throw new Error("messages array cannot be empty");
+    throw new ValidationError("messages array cannot be empty");
   }
   for (const msg of body.messages) {
     if (!msg.role || !msg.content) {
-      throw new Error("each message must have role and content");
+      throw new ValidationError("each message must have role and content");
     }
     if (!["user", "assistant", "system"].includes(msg.role)) {
-      throw new Error("message role must be user, assistant, or system");
+      throw new ValidationError("message role must be user, assistant, or system");
     }
   }
   return {
@@ -192,7 +190,7 @@ async function handleChatCompletion(request, env) {
     });
     return json(result);
   } catch (error2) {
-    if (error2.message.includes("required")) {
+    if (error2 instanceof ValidationError) {
       return badRequest(error2.message);
     }
     return internalError(error2.message);

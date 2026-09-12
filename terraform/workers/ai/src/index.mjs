@@ -1,5 +1,5 @@
 import { json, badRequest, notFound, internalError } from "./lib/response.mjs";
-import { chatCompletion, getAvailableModels, validateChatCompletionRequest } from "./lib/ai.mjs";
+import { chatCompletion, getAvailableModels, validateChatCompletionRequest, ValidationError } from "./lib/ai.mjs";
 
 export default {
   async fetch(request, env, ctx) {
@@ -71,7 +71,7 @@ async function handleChatCompletion(request, env) {
 
     return json(result);
   } catch (error) {
-    if (error.message.includes("required")) {
+    if (error instanceof ValidationError) {
       return badRequest(error.message);
     }
     return internalError(error.message);

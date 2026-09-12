@@ -1,3 +1,5 @@
+export class ValidationError extends Error {}
+
 function normalizeMessages(messages) {
   const normalized = [];
   let systemPrompt = "";
@@ -31,10 +33,8 @@ export async function chatCompletion(ai, messages, options = {}) {
   try {
     const normalizedMessages = normalizeMessages(messages);
 
-
     const response = await ai.run(model, {
-      messages: messages,
-
+      messages: normalizedMessages,
       temperature,
       max_tokens,
       top_p,
@@ -94,20 +94,20 @@ export function getAvailableModels() {
 
 export function validateChatCompletionRequest(body) {
   if (!body.messages || !Array.isArray(body.messages)) {
-    throw new Error("messages is required and must be an array");
+    throw new ValidationError("messages is required and must be an array");
   }
 
   if (body.messages.length === 0) {
-    throw new Error("messages array cannot be empty");
+    throw new ValidationError("messages array cannot be empty");
   }
 
   for (const msg of body.messages) {
     if (!msg.role || !msg.content) {
-      throw new Error("each message must have role and content");
+      throw new ValidationError("each message must have role and content");
     }
 
     if (!["user", "assistant", "system"].includes(msg.role)) {
-      throw new Error("message role must be user, assistant, or system");
+      throw new ValidationError("message role must be user, assistant, or system");
     }
   }
 
