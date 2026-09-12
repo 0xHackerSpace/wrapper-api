@@ -7,6 +7,7 @@ const workers = [
   { name: "auth", entry: "terraform/workers/auth/src/index.mjs", output: "terraform/workers/auth/dist/index.mjs" },
   { name: "ai", entry: "terraform/workers/ai/src/index.mjs", output: "terraform/workers/ai/dist/index.mjs" },
   { name: "rag", entry: "terraform/workers/rag/index.mjs", output: "terraform/workers/rag/dist/index.mjs" },
+  { name: "graph", entry: "terraform/workers/graph/src/index.mjs", output: "terraform/workers/graph/dist/index.mjs" },
 ];
 
 for (const worker of workers) {
