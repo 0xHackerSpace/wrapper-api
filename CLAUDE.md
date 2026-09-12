@@ -121,7 +121,16 @@ wrangler d1 execute dev-auth --remote < migrations/file.sql
 
 ## Testing
 
-Não há suite automatizada ainda. Testar via:
+Testes unitários rodam com o Node.js test runner nativo (sem dependências):
+
+```bash
+npm test                              # Roda todos os testes em tests/*.test.mjs
+node --test tests/ai-worker.test.mjs  # Roda um arquivo específico
+```
+
+Cada worker tem um arquivo `tests/{worker}-worker.test.mjs` que importa o `index.mjs` real e chama `worker.fetch(request, env, ctx)` com um harness de bindings mockados (D1 em memória, `AI.run()` fake, etc). Ao adicionar um worker ou rota, adicione testes seguindo esse padrão.
+
+Testar manualmente via:
 - REST Client (VS Code extension `humao.rest-client`)
 - Exemplos em `requests/call.http`
 - Cloudflare dashboard para logs de workers

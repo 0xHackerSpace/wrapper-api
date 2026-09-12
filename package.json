@@ -2,7 +2,8 @@
   "name": "wrapper-api",
   "private": true,
   "scripts": {
-    "build:workers": "node scripts/build-workers.mjs"
+    "build:workers": "node scripts/build-workers.mjs",
+    "test": "node --test tests/*.test.mjs"
   },
   "devDependencies": {
     "esbuild": "0.25.10"
