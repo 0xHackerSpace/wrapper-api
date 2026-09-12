@@ -41,28 +41,27 @@ export async function chatCompletion(ai, messages, options = {}) {
       top_p,
     });
 
-    return response;
-    // return {
-    //   id: `chatcmpl-${Date.now()}`,
-    //   object: "chat.completion",
-    //   created: Math.floor(Date.now() / 1000),
-    //   model,
-    //   choices: [
-    //     {
-    //       index: 0,
-    //       message: {
-    //         role: "assistant",
-    //         content: response.response || response,
-    //       },
-    //       finish_reason: "stop",
-    //     },
-    //   ],
-    //   usage: {
-    //     prompt_tokens: 0,
-    //     completion_tokens: 0,
-    //     total_tokens: 0,
-    //   },
-    // };
+    return {
+      id: `chatcmpl-${Date.now()}`,
+      object: "chat.completion",
+      created: Math.floor(Date.now() / 1000),
+      model,
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: response.response || response,
+          },
+          finish_reason: "stop",
+        },
+      ],
+      usage: {
+        prompt_tokens: response.usage?.prompt_tokens || 0,
+        completion_tokens: response.usage?.completion_tokens || 0,
+        total_tokens: response.usage?.total_tokens || 0,
+      },
+    };
   } catch (error) {
     throw new Error(`AI model error: ${error.message}`);
   }

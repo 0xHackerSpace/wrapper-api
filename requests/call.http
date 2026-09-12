@@ -1,0 +1,172 @@
+### Wrapper API - HTTP Requests
+### Use REST Client extension in VS Code to run these requests
+
+@baseUrlAuth=https://dev-auth.0xhackerspace.workers.dev
+@baseUrlApi=https://dev-api.0xhackerspace.workers.dev
+@baseUrlRag=https://dev-rag.0xhackerspace.workers.dev
+@baseUrlAI=https://dev-ai.0xhackerspace.workers.dev
+@jwtToken=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIzMjhmMWE3Ny1hNGEzLTRlYTctOWNjMS03OTY1NzEyNTJhNzEiLCJ1c2VybmFtZSI6Imlhbm9saXYiLCJ0eXBlIjoiYWNjZXNzIiwicGVybWlzc2lvbnMiOltdLCJwcm9maWxlcyI6W10sImlhdCI6MTc4OTE3MjM3NCwiZXhwIjoxNzg5MTc1OTc0fQ.c32-ebi_LvLRVUj8SVBYznojNRbRt5o1lT-RcShZSpM
+
+### ============================================
+### AUTH WORKER
+### ============================================
+
+### Signup
+POST {{baseUrlAuth}}/signup
+Content-Type: application/json
+
+{
+  "username": "ianoliv",
+  "email": "ian.oliv@outlook.com",
+  "password": "password123"
+}
+
+### Login
+POST {{baseUrlAuth}}/login
+Content-Type: application/json
+
+{
+  "username": "ianoliv",
+  "password": "password123"
+}
+
+### Logout
+POST {{baseUrlAuth}}/logout
+Authorization: Bearer {{jwtToken}}
+
+### ============================================
+### INGREDIENTS API
+### ============================================
+
+### List all ingredients
+GET {{baseUrlApi}}/ingredients
+Authorization: Bearer {{jwtToken}}
+
+### Get ingredient by ID
+GET {{baseUrlApi}}/ingredients/1a2b3c4d-5e6f-7g8h-9i0j-1k2l3m4n5o6p
+Authorization: Bearer {{jwtToken}}
+
+### Create ingredient
+POST {{baseUrlApi}}/ingredients
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "nome": "Alho",
+  "slug": "alho",
+  "type": "tempero",
+  "reference": "https://en.wikipedia.org/wiki/Garlic",
+  "url": "https://example.com/alho",
+  "permissions": "public"
+}
+
+### Create ingredient (minimal - required fields only)
+POST {{baseUrlApi}}/ingredients
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "nome": "Cebola",
+  "slug": "cebola",
+  "type": "vegetal"
+}
+
+### Update ingredient
+PUT {{baseUrlApi}}/ingredients/1a2b3c4d-5e6f-7g8h-9i0j-1k2l3m4n5o6p
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "nome": "Alho fresco",
+  "reference": "https://pt.wikipedia.org/wiki/Alho"
+}
+
+### Delete ingredient
+DELETE {{baseUrlApi}}/ingredients/1a2b3c4d-5e6f-7g8h-9i0j-1k2l3m4n5o6p
+Authorization: Bearer {{jwtToken}}
+
+### ============================================
+### RAG WORKER
+### ============================================
+
+### Query RAG
+POST {{baseUrlRag}}/query
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "query": "Como preparar alho?",
+  "top_k": 5
+}
+
+### Ingest content
+POST {{baseUrlRag}}/ingest
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "content": "Alho é um tempero versátil usado em muitas culinárias...",
+  "metadata": {
+    "source": "wikipedia",
+    "type": "ingredient"
+  }
+}
+
+### ============================================
+### AI WORKER (OpenAI-compatible)
+### ============================================
+
+### List available models
+GET {{baseUrlAI}}/v1/models
+
+### Chat completion (with system instruction)
+POST {{baseUrlAI}}/v1/chat/completions
+Content-Type: application/json
+
+{
+  "model": "@cf/meta/llama-guard-3-8b",
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are an expert culinary assistant. Provide detailed, practical cooking advice with specific techniques and tips. Be concise but informative."
+    },
+    {
+      "role": "user",
+      "content": "What is a good way to cook garlic?"
+    }
+  ],
+  "temperature": 0.7,
+  "max_tokens": 512
+}
+
+### Chat completion (minimal)
+POST {{baseUrlAI}}/v1/chat/completions
+Content-Type: application/json
+
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Explique como fazer uma receita de alho"
+    }
+  ]
+}
+
+### ============================================
+### NOTES
+### ============================================
+
+### Para usar:
+### 1. Instale a extensão "REST Client" no VS Code (humao.rest-client)
+### 2. Copie o JWT token retornado pelo /login para a variável @jwtToken acima
+### 3. Clique em "Send Request" acima de cada requisição
+### 4. Ou use Ctrl+Alt+R (Windows/Linux) ou Cmd+Alt+R (Mac)
+
+### Exemplo de resposta de login:
+### {
+###   "access_token": "eyJhbGc...",
+###   "token_type": "Bearer",
+###   "expires_in": 3600,
+###   "permissions": ["api:access", "rag:query"],
+###   "profiles": ["User"]
+### }
