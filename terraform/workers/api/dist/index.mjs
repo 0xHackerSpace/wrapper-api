@@ -85,6 +85,13 @@ async function requireAuth(request, env) {
   }
   return payload;
 }
+async function requirePermission(request, env, permission) {
+  const payload = await requireAuth(request, env);
+  if (!Array.isArray(payload.permissions) || !payload.permissions.includes(permission)) {
+    throw new AuthError(403, `Missing required permission: ${permission}`);
+  }
+  return payload;
+}
 
 // terraform/workers/api/src/lib/ingredients-db.mjs
 async function getAllIngredients(db) {
@@ -247,7 +254,7 @@ function handleInfo(env) {
   });
 }
 async function handleProtected(request, env) {
-  const payload = await requireAuth(request, env);
+  const payload = await requirePermission(request, env, "api:access");
   return json({
     message: "Access to protected resource granted",
     user: {
@@ -262,7 +269,7 @@ async function handleProtected(request, env) {
   });
 }
 async function handleProfile(request, env) {
-  const payload = await requireAuth(request, env);
+  const payload = await requirePermission(request, env, "api:access");
   return json({
     profile: {
       username: payload.username,
@@ -275,6 +282,7 @@ async function handleProfile(request, env) {
   });
 }
 async function handleGetAllIngredients(request, env) {
+  await requirePermission(request, env, "api:access");
   if (!env.INGREDIENTS_DB) {
     return json({ error: "Ingredients database not configured" }, 500);
   }
@@ -291,6 +299,7 @@ async function handleGetAllIngredients(request, env) {
   }
 }
 async function handleGetIngredient(request, env, ingredientId) {
+  await requirePermission(request, env, "api:access");
   if (!env.INGREDIENTS_DB) {
     return json({ error: "Ingredients database not configured" }, 500);
   }
@@ -309,6 +318,7 @@ async function handleGetIngredient(request, env, ingredientId) {
   }
 }
 async function handleCreateIngredient(request, env) {
+  await requirePermission(request, env, "api:access");
   if (!env.INGREDIENTS_DB) {
     return json({ error: "Ingredients database not configured" }, 500);
   }
@@ -341,6 +351,7 @@ async function handleCreateIngredient(request, env) {
   }
 }
 async function handleUpdateIngredient(request, env, ingredientId) {
+  await requirePermission(request, env, "api:access");
   if (!env.INGREDIENTS_DB) {
     return json({ error: "Ingredients database not configured" }, 500);
   }
@@ -371,6 +382,7 @@ async function handleUpdateIngredient(request, env, ingredientId) {
   }
 }
 async function handleDeleteIngredient(request, env, ingredientId) {
+  await requirePermission(request, env, "api:access");
   if (!env.INGREDIENTS_DB) {
     return json({ error: "Ingredients database not configured" }, 500);
   }
