@@ -51,3 +51,13 @@ export async function optionalAuth(request, env) {
     throw error;
   }
 }
+
+export async function requirePermission(request, env, permission) {
+  const payload = await requireAuth(request, env);
+
+  if (!Array.isArray(payload.permissions) || !payload.permissions.includes(permission)) {
+    throw new AuthError(403, `Missing required permission: ${permission}`);
+  }
+
+  return payload;
+}
