@@ -1,3 +1,25 @@
+function normalizeMessages(messages) {
+  const normalized = [];
+  let systemPrompt = "";
+
+  for (const msg of messages) {
+    if (msg.role === "system") {
+      systemPrompt += (systemPrompt ? "\n\n" : "") + msg.content;
+    } else {
+      normalized.push(msg);
+    }
+  }
+
+  if (systemPrompt && normalized.length > 0 && normalized[0].role === "user") {
+    normalized[0] = {
+      role: "user",
+      content: `${systemPrompt}\n\n${normalized[0].content}`,
+    };
+  }
+
+  return normalized;
+}
+
 export async function chatCompletion(ai, messages, options = {}) {
   const {
     model = "@cf/meta/llama-2-7b-chat-int8",
@@ -7,8 +29,10 @@ export async function chatCompletion(ai, messages, options = {}) {
   } = options;
 
   try {
+    const normalizedMessages = normalizeMessages(messages);
+
     const response = await ai.run(model, {
-      messages: messages.map(msg => ({
+      messages: normalizedMessages.map(msg => ({
         role: msg.role,
         content: msg.content,
       })),
@@ -17,27 +41,28 @@ export async function chatCompletion(ai, messages, options = {}) {
       top_p,
     });
 
-    return {
-      id: `chatcmpl-${Date.now()}`,
-      object: "chat.completion",
-      created: Math.floor(Date.now() / 1000),
-      model,
-      choices: [
-        {
-          index: 0,
-          message: {
-            role: "assistant",
-            content: response.response || response,
-          },
-          finish_reason: "stop",
-        },
-      ],
-      usage: {
-        prompt_tokens: 0,
-        completion_tokens: 0,
-        total_tokens: 0,
-      },
-    };
+    return response;
+    // return {
+    //   id: `chatcmpl-${Date.now()}`,
+    //   object: "chat.completion",
+    //   created: Math.floor(Date.now() / 1000),
+    //   model,
+    //   choices: [
+    //     {
+    //       index: 0,
+    //       message: {
+    //         role: "assistant",
+    //         content: response.response || response,
+    //       },
+    //       finish_reason: "stop",
+    //     },
+    //   ],
+    //   usage: {
+    //     prompt_tokens: 0,
+    //     completion_tokens: 0,
+    //     total_tokens: 0,
+    //   },
+    // };
   } catch (error) {
     throw new Error(`AI model error: ${error.message}`);
   }
