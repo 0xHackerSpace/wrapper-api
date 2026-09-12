@@ -168,6 +168,7 @@ Decisões arquiteturais documentadas em `docs/decisions/`:
 - **0010**: Claude Code integration guidelines
 - **0011**: Estratégia de testes unitários para workers
 - **0012**: Graph Worker — grafo de conhecimento
+- **0013**: Enforcement de permissões do JWT nos workers
 
 Ler antes de propor mudanças significativas em arquitetura.
 
