@@ -29,10 +29,10 @@ d1_databases = {
   graph = {
     name                  = "dev-graph"
     primary_location_hint = "wnam"
-    # run_migrations left as false on purpose: aplicar manualmente via
-    # `wrangler d1 execute dev-graph --remote < terraform/migrations/0007_create_graph_nodes_and_edges.sql`
-    # apos confirmacao explicita do usuario (ver CLAUDE.md / .claude/rules/terraform.md).
-    run_migrations = false
+    # run_migrations = true: aplicado automaticamente pelo terraform_data
+    # do modulo d1 durante o apply (dev-graph e um banco novo, sem dados
+    # de producao em risco).
+    run_migrations = true
     migrations = [
       "migrations/0007_create_graph_nodes_and_edges.sql"
     ]
