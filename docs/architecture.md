@@ -67,6 +67,24 @@ DELETE /ingredients/:id  - Deletar
 
 Campos: `id` (UUID), `nome`, `slug` (UNIQUE), `type`, `reference`, `url`, `permissions`, timestamps.
 
+## API de IA com OpenAI Compatibility
+
+Conforme [ADR 0008](decisions/0008-openai-compatible-ai-api.md), o AI Worker oferece uma API OpenAI-compatível usando Cloudflare Workers AI:
+
+```
+GET    /v1/models              - Listar modelos disponíveis
+POST   /v1/chat/completions   - Chat completion (compatível com OpenAI)
+GET    /health                - Health check
+GET    /                       - Service info
+```
+
+Modelos suportados:
+- `@cf/meta/llama-2-7b-chat-int8` (padrão)
+- `@cf/mistral/mistral-7b-instruct-v0.1`
+- `@cf/baai/bge-base-en-v1.5` (embeddings)
+
+Permite integração fácil com SDKs OpenAI e ferramentas existentes sem dependências externas.
+
 ## Gerenciamento de Secrets
 
 Conforme [ADR 0005](decisions/0005-jwt-secret-management.md), `JWT_SECRET` é uma variável Terraform sensível injetada em todos os Workers como binding de tipo `secret_text`. Nunca é commitado; definido via `export TF_VAR_jwt_secret="..."` ou HCP Terraform UI.
