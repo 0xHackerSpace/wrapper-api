@@ -146,11 +146,28 @@ test("requests are validated before reaching Workers AI", async () => {
 
 test("a JWT_SECRET binding protects /ingest and /query but not /health", async () => {
   const { post, call } = harness({ JWT_SECRET: "s3cret" });
-  const validToken = await generateToken({ sub: "user-1" }, "s3cret");
+  const queryToken = await generateToken({ sub: "user-1", permissions: ["rag:query"] }, "s3cret");
+  const ingestToken = await generateToken({ sub: "user-1", permissions: ["rag:ingest"] }, "s3cret");
+  const noPermissionToken = await generateToken({ sub: "user-1", permissions: [] }, "s3cret");
 
   assert.equal((await post("/query", { question: "hi" })).status, 401);
   assert.equal((await post("/query", { question: "hi" }, { authorization: "Bearer wrong" })).status, 401);
-  assert.equal((await post("/query", { question: "hi" }, { authorization: `Bearer ${validToken}` })).status, 200);
+  assert.equal(
+    (await post("/query", { question: "hi" }, { authorization: `Bearer ${noPermissionToken}` })).status,
+    403,
+  );
+  assert.equal((await post("/query", { question: "hi" }, { authorization: `Bearer ${queryToken}` })).status, 200);
+
+  assert.equal(
+    (await post("/ingest", { text: "hello" }, { authorization: `Bearer ${queryToken}` })).status,
+    403,
+    "rag:query alone must not grant rag:ingest",
+  );
+  assert.equal(
+    (await post("/ingest", { text: "hello" }, { authorization: `Bearer ${ingestToken}` })).status,
+    201,
+  );
+
   assert.equal((await call("/health", { method: "GET" })).status, 200);
 });
 

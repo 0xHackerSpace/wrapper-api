@@ -98,7 +98,7 @@ function harness(overrides = {}) {
   return { env, db, call, get, post, put, del };
 }
 
-async function authHeader(payload = { sub: "user-1", username: "ianoliv" }) {
+async function authHeader(payload = { sub: "user-1", username: "ianoliv", permissions: ["api:access"] }) {
   const token = await generateToken(payload, JWT_SECRET);
   return { authorization: `Bearer ${token}` };
 }
@@ -121,11 +121,14 @@ test("GET / lists available endpoints", async () => {
   assert.ok(body.endpoints.protected);
 });
 
-test("GET /protected requires a valid JWT", async () => {
+test("GET /protected requires a valid JWT with the api:access permission", async () => {
   const { get } = harness();
 
   assert.equal((await get("/protected")).status, 401);
   assert.equal((await get("/protected", { authorization: "Bearer invalid" })).status, 401);
+
+  const noPermission = await authHeader({ sub: "user-1", username: "ianoliv", permissions: [] });
+  assert.equal((await get("/protected", noPermission)).status, 403);
 
   const headers = await authHeader();
   const { status, body } = await get("/protected", headers);
@@ -135,7 +138,7 @@ test("GET /protected requires a valid JWT", async () => {
 
 test("GET /profile returns the authenticated user's profile", async () => {
   const { get } = harness();
-  const headers = await authHeader({ sub: "user-1", username: "ianoliv" });
+  const headers = await authHeader({ sub: "user-1", username: "ianoliv", permissions: ["api:access"] });
 
   const { status, body } = await get("/profile", headers);
   assert.equal(status, 200);
@@ -143,10 +146,23 @@ test("GET /profile returns the authenticated user's profile", async () => {
   assert.equal(body.profile.authenticated, true);
 });
 
+test("POST /ingredients requires the api:access permission", async () => {
+  const { post } = harness();
+
+  assert.equal((await post("/ingredients", { nome: "Alho", slug: "alho", type: "tempero" })).status, 401);
+
+  const noPermission = await authHeader({ sub: "user-1", username: "ianoliv", permissions: [] });
+  assert.equal(
+    (await post("/ingredients", { nome: "Alho", slug: "alho", type: "tempero" }, noPermission)).status,
+    403,
+  );
+});
+
 test("POST /ingredients creates an ingredient with required fields", async () => {
   const { post, db } = harness();
+  const headers = await authHeader();
 
-  const { status, body } = await post("/ingredients", { nome: "Alho", slug: "alho", type: "tempero" });
+  const { status, body } = await post("/ingredients", { nome: "Alho", slug: "alho", type: "tempero" }, headers);
 
   assert.equal(status, 201);
   assert.equal(body.success, true);
@@ -156,8 +172,9 @@ test("POST /ingredients creates an ingredient with required fields", async () =>
 
 test("POST /ingredients rejects missing required fields", async () => {
   const { post } = harness();
+  const headers = await authHeader();
 
-  const { status, body } = await post("/ingredients", { nome: "Alho" });
+  const { status, body } = await post("/ingredients", { nome: "Alho" }, headers);
 
   assert.equal(status, 400);
   assert.match(body.error, /Missing required fields/);
@@ -169,8 +186,9 @@ test("POST /ingredients rejects duplicate slugs", async () => {
       { id: "1", nome: "Alho", slug: "alho", type: "tempero", reference: null, url: null, permissions: null },
     ]),
   });
+  const headers = await authHeader();
 
-  const { status, body } = await post("/ingredients", { nome: "Alho 2", slug: "alho", type: "tempero" });
+  const { status, body } = await post("/ingredients", { nome: "Alho 2", slug: "alho", type: "tempero" }, headers);
 
   assert.equal(status, 409);
   assert.match(body.error, /already exists/);
@@ -183,8 +201,9 @@ test("GET /ingredients lists all ingredients ordered by nome", async () => {
       { id: "1", nome: "Alho", slug: "alho", type: "tempero", reference: null, url: null, permissions: null },
     ]),
   });
+  const headers = await authHeader();
 
-  const { status, body } = await get("/ingredients");
+  const { status, body } = await get("/ingredients", headers);
 
   assert.equal(status, 200);
   assert.equal(body.count, 2);
@@ -198,12 +217,13 @@ test("GET /ingredients/:id returns a single ingredient or 404", async () => {
       { id: "1", nome: "Alho", slug: "alho", type: "tempero", reference: null, url: null, permissions: null },
     ]),
   });
+  const headers = await authHeader();
 
-  const found = await get("/ingredients/1");
+  const found = await get("/ingredients/1", headers);
   assert.equal(found.status, 200);
   assert.equal(found.body.data.nome, "Alho");
 
-  const notFound = await get("/ingredients/missing");
+  const notFound = await get("/ingredients/missing", headers);
   assert.equal(notFound.status, 404);
 });
 
@@ -213,13 +233,14 @@ test("PUT /ingredients/:id updates fields and rejects unknown id", async () => {
       { id: "1", nome: "Alho", slug: "alho", type: "tempero", reference: null, url: null, permissions: null },
     ]),
   });
+  const headers = await authHeader();
 
-  const { status, body } = await put("/ingredients/1", { nome: "Alho fresco" });
+  const { status, body } = await put("/ingredients/1", { nome: "Alho fresco" }, headers);
   assert.equal(status, 200);
   assert.equal(body.data.nome, "Alho fresco");
   assert.equal(body.data.slug, "alho");
 
-  const missing = await put("/ingredients/missing", { nome: "x" });
+  const missing = await put("/ingredients/missing", { nome: "x" }, headers);
   assert.equal(missing.status, 404);
 });
 
@@ -229,21 +250,23 @@ test("DELETE /ingredients/:id removes the ingredient and rejects unknown id", as
       { id: "1", nome: "Alho", slug: "alho", type: "tempero", reference: null, url: null, permissions: null },
     ]),
   });
+  const headers = await authHeader();
 
-  const { status, body } = await del("/ingredients/1");
+  const { status, body } = await del("/ingredients/1", headers);
   assert.equal(status, 200);
   assert.equal(body.success, true);
   assert.equal(db._rows.length, 0);
 
-  const missing = await del("/ingredients/1");
+  const missing = await del("/ingredients/1", headers);
   assert.equal(missing.status, 404);
 });
 
 test("ingredient routes fail closed when INGREDIENTS_DB is not configured", async () => {
   const { get, post } = harness({ INGREDIENTS_DB: null });
+  const headers = await authHeader();
 
-  assert.equal((await get("/ingredients")).status, 500);
-  assert.equal((await post("/ingredients", { nome: "x", slug: "y", type: "z" })).status, 500);
+  assert.equal((await get("/ingredients", headers)).status, 500);
+  assert.equal((await post("/ingredients", { nome: "x", slug: "y", type: "z" }, headers)).status, 500);
 });
 
 test("unknown routes return 404", async () => {

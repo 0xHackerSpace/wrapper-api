@@ -108,7 +108,7 @@ function harness(overrides = {}) {
   return { env, db, call, get, post };
 }
 
-async function authHeader(payload = { sub: "user-1", username: "ianoliv" }) {
+async function authHeader(payload = { sub: "user-1", username: "ianoliv", permissions: ["graph:read", "graph:write"] }) {
   const token = await generateToken(payload, JWT_SECRET);
   return { authorization: `Bearer ${token}` };
 }
@@ -140,6 +140,18 @@ test("POST /v1/nodes requires a valid JWT", async () => {
 
   const badAuth = await post("/v1/nodes", { type: "concept", label: "Photosynthesis" }, { authorization: "Bearer invalid" });
   assert.equal(badAuth.status, 401);
+});
+
+test("graph:read and graph:write are enforced independently", async () => {
+  const { get, post } = harness();
+  const readOnly = await authHeader({ sub: "user-1", permissions: ["graph:read"] });
+  const writeOnly = await authHeader({ sub: "user-1", permissions: ["graph:write"] });
+
+  const writeWithReadOnly = await post("/v1/nodes", { type: "concept", label: "A" }, readOnly);
+  assert.equal(writeWithReadOnly.status, 403);
+
+  const readWithWriteOnly = await get("/v1/nodes?type=concept", writeOnly);
+  assert.equal(readWithWriteOnly.status, 403);
 });
 
 test("POST /v1/nodes rejects missing required fields with 400, not 500", async () => {
