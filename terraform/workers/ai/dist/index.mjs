@@ -41,7 +41,7 @@ ${normalized[0].content}`
 }
 async function chatCompletion(ai, messages, options = {}) {
   const {
-    model = "@cf/meta/llama-2-7b-chat-int8",
+    model = "@cf/mistral/mistral-7b-instruct-v0.1",
     temperature = 0.7,
     max_tokens = 1024,
     top_p = 1
@@ -49,13 +49,14 @@ async function chatCompletion(ai, messages, options = {}) {
   try {
     const normalizedMessages = normalizeMessages(messages);
     const response = await ai.run(model, {
-      messages: normalizedMessages.map((msg) => ({
-        role: msg.role,
-        content: msg.content
-      })),
+      messages,
+      // messages: normalizedMessages.map(msg => ({
+      //   role: msg.role,
+      //   content: msg.content,
+      // })),
       temperature,
-      max_tokens,
-      top_p
+      max_tokens
+      // // top_p,
     });
     return {
       id: `chatcmpl-${Date.now()}`,
