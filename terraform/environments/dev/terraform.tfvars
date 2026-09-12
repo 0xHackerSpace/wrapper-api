@@ -15,7 +15,8 @@ d1_databases = {
       "migrations/0002_create_auth_logs.sql",
       "migrations/0003_seed_users.sql",
       "migrations/0004_add_profiles_and_permissions.sql",
-      "migrations/0005_seed_roles_and_permissions.sql"
+      "migrations/0005_seed_roles_and_permissions.sql",
+      "migrations/0008_seed_graph_permissions.sql"
     ]
   }
   ingredient = {
