@@ -67,8 +67,9 @@ function requireBindings(env) {
   }
 }
 
-// JWT authentication: validates Bearer token from Authorization header.
-async function authorize(request, env) {
+// JWT authentication: validates Bearer token from Authorization header and,
+// when a permission is given, checks it against the token's permissions claim.
+async function authorize(request, env, permission) {
   if (!env.JWT_SECRET) {
     return;
   }
@@ -84,6 +85,10 @@ async function authorize(request, env) {
 
   if (!payload) {
     throw new HttpError(401, "Invalid or expired token");
+  }
+
+  if (permission && (!Array.isArray(payload.permissions) || !payload.permissions.includes(permission))) {
+    throw new HttpError(403, `Missing required permission: ${permission}`);
   }
 
   return payload;
@@ -329,8 +334,8 @@ async function query(request, env, config) {
 
 const ROUTES = {
   "/health": { method: "GET", handler: (request, env, config) => health(env, config), authenticated: false },
-  "/ingest": { method: "POST", handler: ingest, authenticated: true },
-  "/query": { method: "POST", handler: query, authenticated: true },
+  "/ingest": { method: "POST", handler: ingest, authenticated: true, permission: "rag:ingest" },
+  "/query": { method: "POST", handler: query, authenticated: true, permission: "rag:query" },
 };
 
 export default {
@@ -348,7 +353,7 @@ export default {
     try {
       requireBindings(env);
       if (route.authenticated) {
-        await authorize(request, env);
+        await authorize(request, env, route.permission);
       }
       return await route.handler(request, env, configuration(env));
     } catch (error) {

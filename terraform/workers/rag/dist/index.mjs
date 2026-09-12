@@ -97,7 +97,7 @@ function requireBindings(env) {
     }
   }
 }
-async function authorize(request, env) {
+async function authorize(request, env, permission) {
   if (!env.JWT_SECRET) {
     return;
   }
@@ -109,6 +109,9 @@ async function authorize(request, env) {
   const payload = await verifyToken(token, env.JWT_SECRET);
   if (!payload) {
     throw new HttpError(401, "Invalid or expired token");
+  }
+  if (permission && (!Array.isArray(payload.permissions) || !payload.permissions.includes(permission))) {
+    throw new HttpError(403, `Missing required permission: ${permission}`);
   }
   return payload;
 }
@@ -331,8 +334,8 @@ Question: ${question}` }
 }
 var ROUTES = {
   "/health": { method: "GET", handler: (request, env, config) => health(env, config), authenticated: false },
-  "/ingest": { method: "POST", handler: ingest, authenticated: true },
-  "/query": { method: "POST", handler: query, authenticated: true }
+  "/ingest": { method: "POST", handler: ingest, authenticated: true, permission: "rag:ingest" },
+  "/query": { method: "POST", handler: query, authenticated: true, permission: "rag:query" }
 };
 var index_default = {
   async fetch(request, env, ctx) {
@@ -347,7 +350,7 @@ var index_default = {
     try {
       requireBindings(env);
       if (route.authenticated) {
-        await authorize(request, env);
+        await authorize(request, env, route.permission);
       }
       return await route.handler(request, env, configuration(env));
     } catch (error) {
