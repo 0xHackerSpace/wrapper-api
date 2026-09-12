@@ -50,6 +50,7 @@ Conforme [ADR 0004](decisions/0004-d1-multiple-databases.md), usamos múltiplos 
 
 - **dev-auth**: Usuários, logs, profiles, permissões (5 migrations)
 - **dev-ingredient**: Ingredientes (1 migration)
+- **dev-graph**: Nodes e edges do grafo de conhecimento (1 migration)
 
 Cada Worker recebe bindings D1 específicos no `tfvars`; migrations rodam via `wrangler d1 execute --remote`.
 
@@ -84,6 +85,22 @@ Modelos suportados:
 - `@cf/baai/bge-base-en-v1.5` (embeddings)
 
 Permite integração fácil com SDKs OpenAI e ferramentas existentes sem dependências externas.
+
+## Grafo de Conhecimento (Graph Worker)
+
+Conforme [ADR 0012](decisions/0012-graph-worker-knowledge-graph.md), o Graph Worker complementa o `rag-worker` representando entidades e relações explícitas extraídas de documentos:
+
+```
+GET    /health                     - Health check
+GET    /v1/nodes/:id               - Buscar entidade
+GET    /v1/nodes?type=X            - Listar entidades por tipo
+POST   /v1/nodes                   - Criar entidade
+POST   /v1/edges                   - Criar relação entre duas entidades
+GET    /v1/nodes/:id/neighbors     - Listar entidades conectadas
+GET    /v1/nodes/:id/relations?to= - Relações diretas entre duas entidades
+```
+
+Dados em D1 dedicado (`dev-graph`, binding `GRAPH_DB`), com tabelas `nodes`/`edges` e índices em `type`, `from_node_id`, `to_node_id`. Todas as rotas de `/v1/nodes*` e `/v1/edges*` exigem JWT Bearer, incluindo leituras.
 
 ## Gerenciamento de Secrets
 

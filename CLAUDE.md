@@ -2,16 +2,17 @@
 
 ## Project Overview
 
-**Wrapper API** é uma plataforma serverless construída com Cloudflare Workers e Terraform, implementando APIs para gerenciamento de ingredientes, autenticação, RAG (Retrieval-Augmented Generation) e IA com compatibilidade OpenAI.
+**Wrapper API** é uma plataforma serverless construída com Cloudflare Workers e Terraform, implementando APIs para gerenciamento de ingredientes, autenticação, RAG (Retrieval-Augmented Generation), IA com compatibilidade OpenAI e um grafo de conhecimento.
 
 ## Architecture
 
 ```
-Cloudflare Workers (4 workers) + D1 + R2 + KV + Queues
+Cloudflare Workers (5 workers) + D1 + R2 + KV + Queues
 ├── api-worker: CRUD de ingredientes
 ├── auth-worker: JWT, autenticação
 ├── rag-worker: Busca semântica (Vectorize + BGE embeddings)
-└── ai-worker: Chat completions (OpenAI-compatível, Cloudflare AI)
+├── ai-worker: Chat completions (OpenAI-compatível, Cloudflare AI)
+└── graph-worker: Grafo de conhecimento (nodes/edges, complemento ao RAG)
 ```
 
 **Infraestrutura como Código**: Terraform gerencia todos os recursos via HCP Terraform (workspace: `0xHackerSpace/config/wrapper-api`)
@@ -21,7 +22,7 @@ Cloudflare Workers (4 workers) + D1 + R2 + KV + Queues
 ### Build & Deploy
 
 ```bash
-npm run build:workers        # Compila todos os 4 workers (esbuild)
+npm run build:workers        # Compila todos os 5 workers (esbuild)
 terraform plan              # Valida mudanças
 terraform apply            # Deploy para Cloudflare
 ```
@@ -48,10 +49,11 @@ terraform/workers/{name}/
 Múltiplos D1s por domínio:
 - `dev-auth`: Usuários, profiles, permissões
 - `dev-ingredient`: Ingredientes
+- `dev-graph`: Grafo de conhecimento (nodes/edges)
 
 Migrations via:
 ```bash
-wrangler d1 execute dev-auth --remote < migrations/file.sql
+wrangler d1 execute dev-auth --remote < terraform/migrations/NNNN_nome.sql
 ```
 
 ## Key Files to Know
@@ -109,9 +111,10 @@ wrangler d1 execute dev-auth --remote < migrations/file.sql
 
 ### Add Database Migration
 
-1. Criar arquivo em `migrations/{db}/{sequence}-{name}.sql`
-2. Executar: `wrangler d1 execute {db-name} --remote < migrations/{db}/{file}.sql`
-3. Documentar em `docs/architecture.md`
+1. Criar arquivo em `terraform/migrations/{sequence}_{name}.sql` (numeração sequencial global, sem subpasta por DB)
+2. Adicionar o path à lista `migrations` do D1 correspondente em `terraform/environments/{env}/terraform.tfvars`
+3. Executar manualmente (nunca automático): `wrangler d1 execute {db-name} --remote < terraform/migrations/{file}.sql`
+4. Documentar em `docs/architecture.md`
 
 ### Update Documentation
 
@@ -161,6 +164,10 @@ Decisões arquiteturais documentadas em `docs/decisions/`:
 - **0006**: Ingredients CRUD API
 - **0007**: RBAC + JWT authentication
 - **0008**: AI Worker com OpenAI compatibility
+- **0009**: System message normalization (Cloudflare Workers AI)
+- **0010**: Claude Code integration guidelines
+- **0011**: Estratégia de testes unitários para workers
+- **0012**: Graph Worker — grafo de conhecimento
 
 Ler antes de propor mudanças significativas em arquitetura.
 
