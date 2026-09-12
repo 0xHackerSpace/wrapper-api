@@ -1,5 +1,11 @@
 # Claude Code Guide for wrapper-api
 
+## claude config
+- sempre que possivel delege assuntos de criacao ou edicao do dos workers , dentro da pasta `terraform/workers/{worker}/src/` use o sub agent `worker-dev` para lidar com a criacao de endpoints, rotas, logica de negocio e testes unitarios.
+- para assuntos de terraform, infraestrutura, banco de dados, autenticação e permissões use o sub agent `infra-dev` para lidar com a criação de recursos, migrations, variáveis sensíveis
+
+
+
 ## Project Overview
 
 **Wrapper API** é uma plataforma serverless construída com Cloudflare Workers e Terraform, implementando APIs para gerenciamento de ingredientes, autenticação, RAG (Retrieval-Augmented Generation), IA com compatibilidade OpenAI e um grafo de conhecimento.
