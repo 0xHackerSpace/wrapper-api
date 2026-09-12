@@ -199,16 +199,16 @@ var index_default = {
     try {
       if (pathname === "/health") return handleHealth(env);
       if (pathname === "/") return handleInfo(env);
-      if (pathname === "/protected" && request.method === "GET") return handleProtected(request, env);
-      if (pathname === "/profile" && request.method === "GET") return handleProfile(request, env);
+      if (pathname === "/protected" && request.method === "GET") return await handleProtected(request, env);
+      if (pathname === "/profile" && request.method === "GET") return await handleProfile(request, env);
       const ingredientsMatch = pathname.match(/^\/ingredients(?:\/([^/]+))?$/);
       if (ingredientsMatch) {
         const ingredientId = ingredientsMatch[1];
-        if (pathname === "/ingredients" && request.method === "GET") return handleGetAllIngredients(request, env);
-        if (pathname === "/ingredients" && request.method === "POST") return handleCreateIngredient(request, env);
-        if (ingredientId && pathname === `/ingredients/${ingredientId}` && request.method === "GET") return handleGetIngredient(request, env, ingredientId);
-        if (ingredientId && pathname === `/ingredients/${ingredientId}` && request.method === "PUT") return handleUpdateIngredient(request, env, ingredientId);
-        if (ingredientId && pathname === `/ingredients/${ingredientId}` && request.method === "DELETE") return handleDeleteIngredient(request, env, ingredientId);
+        if (pathname === "/ingredients" && request.method === "GET") return await handleGetAllIngredients(request, env);
+        if (pathname === "/ingredients" && request.method === "POST") return await handleCreateIngredient(request, env);
+        if (ingredientId && pathname === `/ingredients/${ingredientId}` && request.method === "GET") return await handleGetIngredient(request, env, ingredientId);
+        if (ingredientId && pathname === `/ingredients/${ingredientId}` && request.method === "PUT") return await handleUpdateIngredient(request, env, ingredientId);
+        if (ingredientId && pathname === `/ingredients/${ingredientId}` && request.method === "DELETE") return await handleDeleteIngredient(request, env, ingredientId);
       }
       return json({ error: "Not Found" }, 404);
     } catch (error) {
