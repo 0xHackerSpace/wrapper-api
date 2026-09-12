@@ -5,7 +5,8 @@
 @baseUrlApi=https://dev-api.0xhackerspace.workers.dev
 @baseUrlRag=https://dev-rag.0xhackerspace.workers.dev
 @baseUrlAI=https://dev-ai.0xhackerspace.workers.dev
-@jwtToken=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIzMjhmMWE3Ny1hNGEzLTRlYTctOWNjMS03OTY1NzEyNTJhNzEiLCJ1c2VybmFtZSI6Imlhbm9saXYiLCJ0eXBlIjoiYWNjZXNzIiwicGVybWlzc2lvbnMiOltdLCJwcm9maWxlcyI6W10sImlhdCI6MTc4OTE3MjM3NCwiZXhwIjoxNzg5MTc1OTc0fQ.c32-ebi_LvLRVUj8SVBYznojNRbRt5o1lT-RcShZSpM
+@baseUrlGraph=https://dev-graph.0xhackerspace.workers.dev
+@jwtToken=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIzMjhmMWE3Ny1hNGEzLTRlYTctOWNjMS03OTY1NzEyNTJhNzEiLCJ1c2VybmFtZSI6Imlhbm9saXYiLCJ0eXBlIjoiYWNjZXNzIiwicGVybWlzc2lvbnMiOltdLCJwcm9maWxlcyI6W10sImlhdCI6MTc4OTE5NjU0NCwiZXhwIjoxNzg5MjAwMTQ0fQ.QmaenT4Hgk039VBGAHV0pIUPMNfu2x6l6X5VNrFNVo4
 
 ### ============================================
 ### AUTH WORKER
@@ -151,6 +152,185 @@ Content-Type: application/json
     }
   ]
 }
+
+### ============================================
+### GRAPH WORKER (knowledge graph)
+### ============================================
+
+### Health check
+GET {{baseUrlGraph}}/health
+
+### Create node (entity)
+POST {{baseUrlGraph}}/v1/nodes
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "type": "ingredient",
+  "label": "Alho",
+  "properties": {
+    "origin": "Ásia Central"
+  },
+  "source_document_id": "doc-alho-001"
+}
+
+### Create another node (to link as neighbor)
+POST {{baseUrlGraph}}/v1/nodes
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "type": "ingredient",
+  "label": "Cebola",
+  "properties": {
+    "origin": "Ásia Central"
+  }
+}
+### Create another node (to link as neighbor)
+POST {{baseUrlGraph}}/v1/nodes
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "type": "ingredient",
+  "label": "queijo suico",
+  "properties": {
+    "origin": "Europa"
+  }
+}
+
+### Get node by ID
+GET {{baseUrlGraph}}/v1/nodes/1a2b3c4d-5e6f-7g8h-9i0j-1k2l3m4n5o6p
+Authorization: Bearer {{jwtToken}}
+
+### List nodes by type
+GET {{baseUrlGraph}}/v1/nodes?type=ingredient
+Authorization: Bearer {{jwtToken}}
+
+### Create edge (relation between two nodes)
+POST {{baseUrlGraph}}/v1/edges
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "from_node_id": "1a2b3c4d-5e6f-7g8h-9i0j-1k2l3m4n5o6p",
+  "to_node_id": "2b3c4d5e-6f7g-8h9i-0j1k-2l3m4n5o6p7q",
+  "relation": "combines_with",
+  "properties": {
+    "context": "receitas de tempero"
+  }
+}
+
+### List neighbors of a node
+GET {{baseUrlGraph}}/v1/nodes/0aba4e07-e3ee-4b50-abd2-dd1f6a32e834
+Authorization: Bearer {{jwtToken}}
+
+### Check direct relations between two nodes
+GET {{baseUrlGraph}}/v1/nodes/1a2b3c4d-5e6f-7g8h-9i0j-1k2l3m4n5o6p/relations?to=2b3c4d5e-6f7g-8h9i-0j1k-2l3m4n5o6p7q
+Authorization: Bearer {{jwtToken}}
+
+### --- Mais casos de uso ---
+
+### Create node with client-supplied id
+POST {{baseUrlGraph}}/v1/nodes
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "id": "node-cebolinha",
+  "type": "ingredient",
+  "label": "Cebolinha",
+  "properties": {
+    "origin": "América do Sul"
+  }
+}
+
+### Build a small graph: third node + second edge (Alho -[substitui]-> Cebolinha)
+POST {{baseUrlGraph}}/v1/edges
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "from_node_id": "0aba4e07-e3ee-4b50-abd2-dd1f6a32e834",
+  "to_node_id": "node-cebolinha",
+  "relation": "substitui",
+  "properties": {
+    "context": "quando alho não está disponível"
+  }
+}
+
+### List neighbors after multiple edges (should include Cebola + Cebolinha, each with sua relation)
+GET {{baseUrlGraph}}/v1/nodes/0aba4e07-e3ee-4b50-abd2-dd1f6a32e834/neighbors
+Authorization: Bearer {{jwtToken}}
+
+### Node from a RAG-ingested document (source_document_id linka de volta ao rag-worker)
+POST {{baseUrlGraph}}/v1/nodes
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "type": "concept",
+  "label": "Culinária mediterrânea",
+  "source_document_id": "doc-alho-001"
+}
+
+### List nodes by type "concept"
+GET {{baseUrlGraph}}/v1/nodes?type=concept
+Authorization: Bearer {{jwtToken}}
+
+### --- Casos de erro ---
+
+### Missing auth token on a protected route (expect 401)
+POST {{baseUrlGraph}}/v1/nodes
+Content-Type: application/json
+
+{
+  "type": "ingredient",
+  "label": "Sal"
+}
+
+### Invalid/expired token (expect 401)
+GET {{baseUrlGraph}}/v1/nodes?type=ingredient
+Authorization: Bearer token-invalido
+
+### Create node without required field "label" (expect 400, ValidationError)
+POST {{baseUrlGraph}}/v1/nodes
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "type": "ingredient"
+}
+
+### List nodes without required "type" query param (expect 400)
+GET {{baseUrlGraph}}/v1/nodes
+Authorization: Bearer {{jwtToken}}
+
+### Get a node that doesn't exist (expect 404)
+GET {{baseUrlGraph}}/v1/nodes/00000000-0000-0000-0000-000000000000
+Authorization: Bearer {{jwtToken}}
+
+### Create edge pointing to a node that doesn't exist (expect 400, ValidationError)
+POST {{baseUrlGraph}}/v1/edges
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "from_node_id": "1a2b3c4d-5e6f-7g8h-9i0j-1k2l3m4n5o6p",
+  "to_node_id": "00000000-0000-0000-0000-000000000000",
+  "relation": "related_to"
+}
+
+### Neighbors of a node with no relations (expect empty list)
+GET {{baseUrlGraph}}/v1/nodes/node-cebolinha/neighbors
+Authorization: Bearer {{jwtToken}}
+
+### Relations between two nodes that aren't directly connected (expect empty/none)
+GET {{baseUrlGraph}}/v1/nodes/node-cebolinha/relations?to=00000000-0000-0000-0000-000000000000
+Authorization: Bearer {{jwtToken}}
+
+### Unknown route on graph worker (expect 404)
+GET {{baseUrlGraph}}/v1/unknown
 
 ### ============================================
 ### NOTES
