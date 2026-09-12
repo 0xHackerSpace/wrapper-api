@@ -2,6 +2,9 @@ resource "cloudflare_d1_database" "this" {
   account_id            = var.account_id
   name                  = var.name
   primary_location_hint = var.primary_location_hint
+  lifecycle {
+    ignore_changes = [created_at, num_tables,file_size,version,read_replication]
+  }
 }
 
 # Note: Migrations are best run locally or via CI/CD with direct file access
@@ -36,4 +39,7 @@ resource "terraform_data" "migrations" {
   depends_on = [
     cloudflare_d1_database.this
   ]
+
+
+
 }
