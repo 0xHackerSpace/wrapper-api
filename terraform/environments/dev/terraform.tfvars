@@ -51,6 +51,16 @@ workers = {
       }
     ]
   }
+  ai = {
+    script_path        = "workers/ai/dist/index.mjs"
+    compatibility_date = "2026-08-24"
+    bindings = [
+      {
+        name = "AI"
+        type = "ai"
+      }
+    ]
+  }
 }
 
 rag_stacks = {

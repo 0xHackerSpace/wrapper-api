@@ -102,7 +102,7 @@ variable "workers" {
     bindings = optional(list(object({
       name         = string
       type         = string
-      resource_key = string
+      resource_key = optional(string)
     })), [])
     additional_bindings = optional(list(map(string)), [])
   }))

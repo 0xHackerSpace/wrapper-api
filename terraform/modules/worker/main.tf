@@ -5,6 +5,24 @@ resource "cloudflare_workers_script" "this" {
   main_module        = basename(var.script_path)
   compatibility_date = var.compatibility_date
   bindings           = var.bindings
+  observability = {
+      enabled = true
+      head_sampling_rate = 0.1
+      logs = {
+        enabled = true
+        invocation_logs = true
+        destinations = ["cloudflare"]
+        head_sampling_rate = 0.1
+        persist = true
+      }
+      redact_query_string = false
+      traces = {
+        destinations = ["cloudflare"]
+        enabled = true
+        head_sampling_rate = 0.1
+        persist = true
+      }
+    }
 }
 
 resource "cloudflare_workers_script_subdomain" "this" {
