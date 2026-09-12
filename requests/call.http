@@ -124,15 +124,15 @@ POST {{baseUrlAI}}/v1/chat/completions
 Content-Type: application/json
 
 {
-  "model": "@cf/meta/llama-guard-3-8b",
+  "model": "@cf/mistral/mistral-7b-instruct-v0.1",
   "messages": [
     {
       "role": "system",
-      "content": "You are an expert culinary assistant. Provide detailed, practical cooking advice with specific techniques and tips. Be concise but informative."
+      "content": "Você é um assistente útil e amigável que responde perguntas de forma clara e concisa.me responda apenas em português."
     },
     {
       "role": "user",
-      "content": "What is a good way to cook garlic?"
+      "content": "qual a capital da França?"
     }
   ],
   "temperature": 0.7,
