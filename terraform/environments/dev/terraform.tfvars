@@ -1,9 +1,9 @@
 # Fill IDs and resource declarations for development. Do not put tokens or secrets here.
-account_id              = "dbe6f61104309ab5a6bf80c5721f4712"
-environment             = "dev"
-workers_subdomain       = "0xhackerspace"
+account_id        = "dbe6f61104309ab5a6bf80c5721f4712"
+environment       = "dev"
+workers_subdomain = "0xhackerspace"
 # cloudflare_api_token should be set via environment variable or HCP Terraform UI
-jwt_secret              = "dev-jwt-secret-key-32-characters-min"
+jwt_secret = "dev-jwt-secret-key-32-characters-min"
 
 d1_databases = {
   auth = {
@@ -24,6 +24,17 @@ d1_databases = {
     run_migrations        = true
     migrations = [
       "migrations/0006_create_ingredients.sql"
+    ]
+  }
+  graph = {
+    name                  = "dev-graph"
+    primary_location_hint = "wnam"
+    # run_migrations left as false on purpose: aplicar manualmente via
+    # `wrangler d1 execute dev-graph --remote < terraform/migrations/0007_create_graph_nodes_and_edges.sql`
+    # apos confirmacao explicita do usuario (ver CLAUDE.md / .claude/rules/terraform.md).
+    run_migrations = false
+    migrations = [
+      "migrations/0007_create_graph_nodes_and_edges.sql"
     ]
   }
 }
@@ -58,6 +69,17 @@ workers = {
       {
         name = "AI"
         type = "ai"
+      }
+    ]
+  }
+  graph = {
+    script_path        = "workers/graph/dist/index.mjs"
+    compatibility_date = "2026-08-24"
+    bindings = [
+      {
+        name         = "GRAPH_DB"
+        type         = "d1"
+        resource_key = "graph"
       }
     ]
   }
