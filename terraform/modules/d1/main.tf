@@ -14,26 +14,26 @@ resource "cloudflare_d1_database" "this" {
 # Or use GitHub Actions with wrangler deployed
 
 # Uncomment below for local runs (terraform apply from your machine)
-# resource "terraform_data" "migrations" {
-#   count = var.run_migrations ? 1 : 0
-#
-#   triggers_replace = [
-#     for migration in var.migrations : filesha256(migration)
-#   ]
-#
-#   provisioner "local-exec" {
-#     command = <<-EOT
-#       for migration in ${join(" ", var.migrations)}; do
-#         echo "Applying migration: $migration"
-#         npx wrangler d1 execute ${cloudflare_d1_database.this.name} --file="$migration" --remote
-#       done
-#     EOT
-#     environment = {
-#       CLOUDFLARE_API_TOKEN = var.cloudflare_api_token
-#     }
-#   }
-#
-#   depends_on = [
-#     cloudflare_d1_database.this
-#   ]
-# }
+resource "terraform_data" "migrations" {
+  count = var.run_migrations ? 1 : 0
+
+  triggers_replace = [
+    for migration in var.migrations : filesha256(migration)
+  ]
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      for migration in ${join(" ", var.migrations)}; do
+        echo "Applying migration: $migration  ${cloudflare_d1_database.this.name} " 
+        npx wrangler d1 execute ${cloudflare_d1_database.this.name} --file="$migration" --remote --y
+      done
+    EOT
+    # environment = {
+    #   CLOUDFLARE_API_TOKEN = var.cloudflare_api_token
+    # }
+  }
+
+  depends_on = [
+    cloudflare_d1_database.this
+  ]
+}

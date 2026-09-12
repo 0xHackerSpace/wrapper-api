@@ -11,11 +11,11 @@ d1_databases = {
     primary_location_hint = "wnam"
     run_migrations        = true
     migrations = [
-      "terraform/migrations/0001_create_users.sql",
-      "terraform/migrations/0002_create_auth_logs.sql",
-      "terraform/migrations/0003_seed_users.sql",
-      "terraform/migrations/0004_add_profiles_and_permissions.sql",
-      "terraform/migrations/0005_seed_roles_and_permissions.sql"
+      "migrations/0001_create_users.sql",
+      "migrations/0002_create_auth_logs.sql",
+      "migrations/0003_seed_users.sql",
+      "migrations/0004_add_profiles_and_permissions.sql",
+      "migrations/0005_seed_roles_and_permissions.sql"
     ]
   }
   ingredient = {
@@ -23,7 +23,7 @@ d1_databases = {
     primary_location_hint = "wnam"
     run_migrations        = true
     migrations = [
-      "terraform/migrations/0006_create_ingredients.sql"
+      "migrations/0006_create_ingredients.sql"
     ]
   }
 }
