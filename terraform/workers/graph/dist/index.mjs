@@ -92,6 +92,13 @@ async function requireAuth(request, env) {
   }
   return payload;
 }
+async function requirePermission(request, env, permission) {
+  const payload = await requireAuth(request, env);
+  if (!Array.isArray(payload.permissions) || !payload.permissions.includes(permission)) {
+    throw new AuthError(403, `Missing required permission: ${permission}`);
+  }
+  return payload;
+}
 
 // terraform/workers/graph/src/lib/graph-db.mjs
 var ValidationError = class extends Error {
@@ -317,7 +324,7 @@ function handleInfo(env) {
   });
 }
 async function handleCreateNode(request, env) {
-  await requireAuth(request, env);
+  await requirePermission(request, env, "graph:write");
   if (!env.GRAPH_DB) {
     return internalError("Graph database not configured");
   }
@@ -333,7 +340,7 @@ async function handleCreateNode(request, env) {
   return json({ success: true, data: node }, 201);
 }
 async function handleListNodes(request, env, url) {
-  await requireAuth(request, env);
+  await requirePermission(request, env, "graph:read");
   if (!env.GRAPH_DB) {
     return internalError("Graph database not configured");
   }
@@ -345,7 +352,7 @@ async function handleListNodes(request, env, url) {
   return json({ success: true, data: nodes, count: nodes.length });
 }
 async function handleGetNode(request, env, nodeId) {
-  await requireAuth(request, env);
+  await requirePermission(request, env, "graph:read");
   if (!env.GRAPH_DB) {
     return internalError("Graph database not configured");
   }
@@ -356,7 +363,7 @@ async function handleGetNode(request, env, nodeId) {
   return json({ success: true, data: node });
 }
 async function handleGetNeighbors(request, env, nodeId) {
-  await requireAuth(request, env);
+  await requirePermission(request, env, "graph:read");
   if (!env.GRAPH_DB) {
     return internalError("Graph database not configured");
   }
@@ -368,7 +375,7 @@ async function handleGetNeighbors(request, env, nodeId) {
   return json({ success: true, data: neighbors, count: neighbors.length });
 }
 async function handleGetRelations(request, env, nodeId, url) {
-  await requireAuth(request, env);
+  await requirePermission(request, env, "graph:read");
   if (!env.GRAPH_DB) {
     return internalError("Graph database not configured");
   }
@@ -384,7 +391,7 @@ async function handleGetRelations(request, env, nodeId, url) {
   return json({ success: true, data: relations, count: relations.length });
 }
 async function handleCreateEdge(request, env) {
-  await requireAuth(request, env);
+  await requirePermission(request, env, "graph:write");
   if (!env.GRAPH_DB) {
     return internalError("Graph database not configured");
   }

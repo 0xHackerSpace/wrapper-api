@@ -1,5 +1,5 @@
 import { json, badRequest, notFound, internalError } from "./lib/response.mjs";
-import { requireAuth, AuthError } from "./lib/auth.mjs";
+import { requirePermission, AuthError } from "./lib/auth.mjs";
 import {
   getNodeById,
   listNodesByType,
@@ -91,7 +91,7 @@ function handleInfo(env) {
 }
 
 async function handleCreateNode(request, env) {
-  await requireAuth(request, env);
+  await requirePermission(request, env, "graph:write");
 
   if (!env.GRAPH_DB) {
     return internalError("Graph database not configured");
@@ -112,7 +112,7 @@ async function handleCreateNode(request, env) {
 }
 
 async function handleListNodes(request, env, url) {
-  await requireAuth(request, env);
+  await requirePermission(request, env, "graph:read");
 
   if (!env.GRAPH_DB) {
     return internalError("Graph database not configured");
@@ -128,7 +128,7 @@ async function handleListNodes(request, env, url) {
 }
 
 async function handleGetNode(request, env, nodeId) {
-  await requireAuth(request, env);
+  await requirePermission(request, env, "graph:read");
 
   if (!env.GRAPH_DB) {
     return internalError("Graph database not configured");
@@ -143,7 +143,7 @@ async function handleGetNode(request, env, nodeId) {
 }
 
 async function handleGetNeighbors(request, env, nodeId) {
-  await requireAuth(request, env);
+  await requirePermission(request, env, "graph:read");
 
   if (!env.GRAPH_DB) {
     return internalError("Graph database not configured");
@@ -159,7 +159,7 @@ async function handleGetNeighbors(request, env, nodeId) {
 }
 
 async function handleGetRelations(request, env, nodeId, url) {
-  await requireAuth(request, env);
+  await requirePermission(request, env, "graph:read");
 
   if (!env.GRAPH_DB) {
     return internalError("Graph database not configured");
@@ -180,7 +180,7 @@ async function handleGetRelations(request, env, nodeId, url) {
 }
 
 async function handleCreateEdge(request, env) {
-  await requireAuth(request, env);
+  await requirePermission(request, env, "graph:write");
 
   if (!env.GRAPH_DB) {
     return internalError("Graph database not configured");
