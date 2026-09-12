@@ -98,7 +98,9 @@ function harness(overrides = {}) {
   return { env, db, call, get, post, put, del };
 }
 
-async function authHeader(payload = { sub: "user-1", username: "ianoliv", permissions: ["api:access"] }) {
+const ALL_INGREDIENT_PERMISSIONS = ["api:access", "ingredient:read", "ingredient:create", "ingredient:update", "ingredient:delete"];
+
+async function authHeader(payload = { sub: "user-1", username: "ianoliv", permissions: ALL_INGREDIENT_PERMISSIONS }) {
   const token = await generateToken(payload, JWT_SECRET);
   return { authorization: `Bearer ${token}` };
 }
@@ -146,7 +148,7 @@ test("GET /profile returns the authenticated user's profile", async () => {
   assert.equal(body.profile.authenticated, true);
 });
 
-test("POST /ingredients requires the api:access permission", async () => {
+test("POST /ingredients requires the ingredient:create permission", async () => {
   const { post } = harness();
 
   assert.equal((await post("/ingredients", { nome: "Alho", slug: "alho", type: "tempero" })).status, 401);
@@ -156,6 +158,27 @@ test("POST /ingredients requires the api:access permission", async () => {
     (await post("/ingredients", { nome: "Alho", slug: "alho", type: "tempero" }, noPermission)).status,
     403,
   );
+
+  const readOnly = await authHeader({ sub: "user-1", username: "ianoliv", permissions: ["ingredient:read"] });
+  assert.equal(
+    (await post("/ingredients", { nome: "Alho", slug: "alho", type: "tempero" }, readOnly)).status,
+    403,
+    "ingredient:read alone must not grant ingredient:create",
+  );
+});
+
+test("ingredient CRUD permissions are enforced independently per method", async () => {
+  const { get, post, put, del } = harness({
+    INGREDIENTS_DB: createIngredientsDB([
+      { id: "1", nome: "Alho", slug: "alho", type: "tempero", reference: null, url: null, permissions: null },
+    ]),
+  });
+  const readOnly = await authHeader({ sub: "user-1", permissions: ["ingredient:read"] });
+
+  assert.equal((await get("/ingredients", readOnly)).status, 200);
+  assert.equal((await post("/ingredients", { nome: "Cebola", slug: "cebola", type: "vegetal" }, readOnly)).status, 403);
+  assert.equal((await put("/ingredients/1", { nome: "Alho fresco" }, readOnly)).status, 403);
+  assert.equal((await del("/ingredients/1", readOnly)).status, 403);
 });
 
 test("POST /ingredients creates an ingredient with required fields", async () => {
