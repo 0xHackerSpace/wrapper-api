@@ -86,6 +86,13 @@ function createGraphDB(seedGraphs = [], seedAccess = [], seedNodes = [], seedEdg
           );
           return { results };
         }
+        if (sql.includes("FROM graph_access") && sql.includes("WHERE graph_id = ?") && sql.includes("ORDER BY created_at")) {
+          const [graphId] = boundArgs;
+          const results = access
+            .filter((a) => a.graph_id === graphId)
+            .sort((x, y) => (x.created_at || "").localeCompare(y.created_at || ""));
+          return { results };
+        }
         if (sql.includes("FROM nodes") && sql.includes("WHERE graph_id = ? AND type = ?")) {
           const [graphId, type] = boundArgs;
           const results = nodes
@@ -107,6 +114,18 @@ function createGraphDB(seedGraphs = [], seedAccess = [], seedNodes = [], seedEdg
         if (sql.startsWith("INSERT INTO graph_access")) {
           const [id, graph_id, user_id, role] = boundArgs;
           access.push({ id, graph_id, user_id, role, created_at: new Date().toISOString() });
+          return { success: true };
+        }
+        if (sql.startsWith("UPDATE graph_access")) {
+          const [role, graph_id, user_id] = boundArgs;
+          const row = access.find((a) => a.graph_id === graph_id && a.user_id === user_id);
+          if (row) row.role = role;
+          return { success: true };
+        }
+        if (sql.startsWith("DELETE FROM graph_access")) {
+          const [graph_id, user_id] = boundArgs;
+          const index = access.findIndex((a) => a.graph_id === graph_id && a.user_id === user_id);
+          if (index !== -1) access.splice(index, 1);
           return { success: true };
         }
         if (sql.startsWith("INSERT INTO nodes")) {
@@ -162,8 +181,11 @@ function harness(overrides = {}) {
   const get = (path, headers = {}) => call(path, { method: "GET", headers });
   const post = (path, body, headers = {}) =>
     call(path, { method: "POST", body: JSON.stringify(body), headers: { "content-type": "application/json", ...headers } });
+  const put = (path, body, headers = {}) =>
+    call(path, { method: "PUT", body: JSON.stringify(body), headers: { "content-type": "application/json", ...headers } });
+  const del = (path, headers = {}) => call(path, { method: "DELETE", headers });
 
-  return { env, db, call, get, post };
+  return { env, db, call, get, post, put, del };
 }
 
 async function authHeader(payload = { sub: "user-1", username: "ianoliv", permissions: ["graph:read", "graph:write"] }) {
@@ -515,6 +537,154 @@ test("graph routes fail closed when GRAPH_DB is not configured", async () => {
 
   assert.equal((await get("/v1/graphs/g1/nodes?type=concept", headers)).status, 500);
   assert.equal((await post("/v1/graphs/g1/nodes", { type: "concept", label: "A" }, headers)).status, 500);
+});
+
+test("PUT /v1/graphs/:graphId/access/:userId grants access and GET/DELETE reflect it (happy path)", async () => {
+  const db = createGraphDB();
+  seedGraph(db, { id: "g1", owners: ["user-1"] });
+  const { put, get, del } = harness({ GRAPH_DB: db });
+  const headers = await authHeader();
+
+  const granted = await put("/v1/graphs/g1/access/user-2", { role: "editor" }, headers);
+  assert.equal(granted.status, 200);
+  assert.deepEqual(granted.body.data, { graph_id: "g1", user_id: "user-2", role: "editor" });
+
+  const listed = await get("/v1/graphs/g1/access", headers);
+  assert.equal(listed.status, 200);
+  assert.equal(listed.body.count, 2);
+  const byUser = Object.fromEntries(listed.body.data.map((row) => [row.user_id, row.role]));
+  assert.equal(byUser["user-1"], "owner");
+  assert.equal(byUser["user-2"], "editor");
+
+  const revoked = await del("/v1/graphs/g1/access/user-2", headers);
+  assert.equal(revoked.status, 200);
+  assert.equal(db._access.some((a) => a.user_id === "user-2"), false);
+});
+
+test("PUT /v1/graphs/:graphId/access/:userId upserts: granting to an existing collaborator updates the role instead of duplicating", async () => {
+  const db = createGraphDB();
+  seedGraph(db, { id: "g1", owners: ["user-1"], viewers: ["user-2"] });
+  const { put } = harness({ GRAPH_DB: db });
+  const headers = await authHeader();
+
+  const { status, body } = await put("/v1/graphs/g1/access/user-2", { role: "editor" }, headers);
+
+  assert.equal(status, 200);
+  assert.equal(body.data.role, "editor");
+  assert.equal(db._access.filter((a) => a.user_id === "user-2").length, 1);
+  assert.equal(db._access.find((a) => a.user_id === "user-2").role, "editor");
+});
+
+test("PUT /v1/graphs/:graphId/access/:userId rejects an invalid role with 400", async () => {
+  const db = createGraphDB();
+  seedGraph(db, { id: "g1", owners: ["user-1"] });
+  const { put } = harness({ GRAPH_DB: db });
+  const headers = await authHeader();
+
+  const { status, body } = await put("/v1/graphs/g1/access/user-2", { role: "admin" }, headers);
+
+  assert.equal(status, 400);
+  assert.match(body.error.message, /role/);
+});
+
+test("PUT /v1/graphs/:graphId/access/:userId rejects downgrading the sole owner with 409", async () => {
+  const db = createGraphDB();
+  seedGraph(db, { id: "g1", owners: ["user-1"] });
+  const { put } = harness({ GRAPH_DB: db });
+  const headers = await authHeader();
+
+  const { status, body } = await put("/v1/graphs/g1/access/user-1", { role: "editor" }, headers);
+
+  assert.equal(status, 409);
+  assert.match(body.error.message, /at least one owner/);
+});
+
+test("PUT/DELETE on someone else by a non-owner (editor) returns 403", async () => {
+  const db = createGraphDB();
+  seedGraph(db, { id: "g1", owners: ["user-1"], editors: ["user-2"] });
+  const { put, del } = harness({ GRAPH_DB: db });
+  const headers = await authHeader({ sub: "user-2", permissions: ["graph:read", "graph:write"] });
+
+  assert.equal((await put("/v1/graphs/g1/access/user-3", { role: "viewer" }, headers)).status, 403);
+  assert.equal((await del("/v1/graphs/g1/access/user-1", headers)).status, 403);
+});
+
+test("PUT/DELETE on someone else with graph:read but not graph:write returns 403", async () => {
+  const db = createGraphDB();
+  seedGraph(db, { id: "g1", owners: ["user-1", "user-2"] });
+  const { put, del } = harness({ GRAPH_DB: db });
+  const headers = await authHeader({ sub: "user-1", permissions: ["graph:read"] });
+
+  assert.equal((await put("/v1/graphs/g1/access/user-2", { role: "viewer" }, headers)).status, 403);
+  assert.equal((await del("/v1/graphs/g1/access/user-2", headers)).status, 403);
+});
+
+test("DELETE /v1/graphs/:graphId/access/:userId self-removal only requires graph:read", async () => {
+  const db = createGraphDB();
+  seedGraph(db, { id: "g1", owners: ["user-1"], viewers: ["user-2"] });
+  const { del } = harness({ GRAPH_DB: db });
+  const headers = await authHeader({ sub: "user-2", permissions: ["graph:read"] });
+
+  const { status } = await del("/v1/graphs/g1/access/user-2", headers);
+
+  assert.equal(status, 200);
+  assert.equal(db._access.some((a) => a.user_id === "user-2"), false);
+});
+
+test("DELETE /v1/graphs/:graphId/access/:userId rejects removing the sole owner, self or by another owner, with 409", async () => {
+  const db = createGraphDB();
+  seedGraph(db, { id: "g1", owners: ["user-1"] });
+  const { del } = harness({ GRAPH_DB: db });
+  const selfHeaders = await authHeader({ sub: "user-1", permissions: ["graph:read"] });
+
+  const selfRemoval = await del("/v1/graphs/g1/access/user-1", selfHeaders);
+  assert.equal(selfRemoval.status, 409);
+  assert.match(selfRemoval.body.error.message, /at least one owner/);
+
+  const db2 = createGraphDB();
+  seedGraph(db2, { id: "g2", owners: ["user-1", "user-2"] });
+  const { del: del2 } = harness({ GRAPH_DB: db2 });
+  const otherOwnerHeaders = await authHeader({ sub: "user-1", permissions: ["graph:read", "graph:write"] });
+
+  const firstRemoval = await del2("/v1/graphs/g2/access/user-2", otherOwnerHeaders);
+  assert.equal(firstRemoval.status, 200);
+
+  const lastOwnerRemoval = await del2("/v1/graphs/g2/access/user-1", otherOwnerHeaders);
+  assert.equal(lastOwnerRemoval.status, 409);
+  assert.match(lastOwnerRemoval.body.error.message, /at least one owner/);
+});
+
+test("GET /v1/graphs/:graphId/access can be called by a viewer", async () => {
+  const db = createGraphDB();
+  seedGraph(db, { id: "g1", owners: ["user-2"], viewers: ["user-1"] });
+  const { get } = harness({ GRAPH_DB: db });
+  const headers = await authHeader({ sub: "user-1", permissions: ["graph:read", "graph:write"] });
+
+  const { status, body } = await get("/v1/graphs/g1/access", headers);
+
+  assert.equal(status, 200);
+  assert.equal(body.count, 2);
+});
+
+test("access routes return 404 for a non-existent graphId", async () => {
+  const { put, del, get } = harness();
+  const headers = await authHeader();
+
+  assert.equal((await put("/v1/graphs/missing/access/user-2", { role: "viewer" }, headers)).status, 404);
+  assert.equal((await del("/v1/graphs/missing/access/user-2", headers)).status, 404);
+  assert.equal((await get("/v1/graphs/missing/access", headers)).status, 404);
+});
+
+test("DELETE /v1/graphs/:graphId/access/:userId returns 404 when the target has no access row", async () => {
+  const db = createGraphDB();
+  seedGraph(db, { id: "g1", owners: ["user-1"] });
+  const { del } = harness({ GRAPH_DB: db });
+  const headers = await authHeader();
+
+  const { status, body } = await del("/v1/graphs/g1/access/user-2", headers);
+
+  assert.equal(status, 404);
+  assert.match(body.error.message, /not found/i);
 });
 
 test("unknown routes return 404", async () => {

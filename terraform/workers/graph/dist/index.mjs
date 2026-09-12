@@ -216,6 +216,59 @@ async function getGraphAccess(db, graphId, userId) {
   const row = await db.prepare("SELECT role FROM graph_access WHERE graph_id = ? AND user_id = ?").bind(graphId, userId).first();
   return row?.role ?? null;
 }
+var VALID_ROLES = ["owner", "editor", "viewer"];
+async function listGraphAccess(db, graphId) {
+  if (!db) {
+    throw new Error("Database not configured");
+  }
+  const results = await db.prepare("SELECT user_id, role, created_at FROM graph_access WHERE graph_id = ? ORDER BY created_at").bind(graphId).all();
+  return (results.results || []).map((row) => ({
+    user_id: row.user_id,
+    role: row.role,
+    created_at: row.created_at
+  }));
+}
+async function countOwners(db, graphId) {
+  const access = await listGraphAccess(db, graphId);
+  return access.filter((a) => a.role === "owner").length;
+}
+async function assertNotLastOwner(db, graphId, currentRole, keepsOwnerRole) {
+  if (currentRole !== "owner" || keepsOwnerRole) {
+    return;
+  }
+  const owners = await countOwners(db, graphId);
+  if (owners <= 1) {
+    throw new ConflictError("Graph must have at least one owner");
+  }
+}
+async function upsertGraphAccess(db, graphId, userId, role) {
+  if (!db) {
+    throw new Error("Database not configured");
+  }
+  if (!VALID_ROLES.includes(role)) {
+    throw new ValidationError(`Invalid role: must be one of ${VALID_ROLES.join(", ")}`);
+  }
+  const currentRole = await getGraphAccess(db, graphId, userId);
+  await assertNotLastOwner(db, graphId, currentRole, role === "owner");
+  if (currentRole) {
+    await db.prepare("UPDATE graph_access SET role = ? WHERE graph_id = ? AND user_id = ?").bind(role, graphId, userId).run();
+  } else {
+    await db.prepare("INSERT INTO graph_access (id, graph_id, user_id, role) VALUES (?, ?, ?, ?)").bind(crypto.randomUUID(), graphId, userId, role).run();
+  }
+  return { graph_id: graphId, user_id: userId, role };
+}
+async function deleteGraphAccess(db, graphId, userId) {
+  if (!db) {
+    throw new Error("Database not configured");
+  }
+  const currentRole = await getGraphAccess(db, graphId, userId);
+  if (!currentRole) {
+    return false;
+  }
+  await assertNotLastOwner(db, graphId, currentRole, false);
+  await db.prepare("DELETE FROM graph_access WHERE graph_id = ? AND user_id = ?").bind(graphId, userId).run();
+  return true;
+}
 async function getNodeById(db, graphId, id) {
   if (!db) {
     throw new Error("Database not configured");
@@ -360,7 +413,7 @@ var index_default = {
       if (pathname === "/" || pathname === "/v1") return handleInfo(env);
       if (pathname === "/v1/graphs" && request.method === "POST") return await handleCreateGraph(request, env);
       if (pathname === "/v1/graphs" && request.method === "GET") return await handleListGraphs(request, env);
-      const graphMatch = pathname.match(/^\/v1\/graphs\/([^/]+)(?:\/(nodes|edges)(?:\/([^/]+)(?:\/(neighbors|relations))?)?)?$/);
+      const graphMatch = pathname.match(/^\/v1\/graphs\/([^/]+)(?:\/(nodes|edges|access)(?:\/([^/]+)(?:\/(neighbors|relations))?)?)?$/);
       if (graphMatch) {
         const graphId = graphMatch[1];
         const resource = graphMatch[2];
@@ -375,6 +428,11 @@ var index_default = {
         }
         if (resource === "edges" && !resourceId && request.method === "POST") {
           return await handleCreateEdge(request, env, graphId);
+        }
+        if (resource === "access") {
+          if (!resourceId && request.method === "GET") return await handleListAccess(request, env, graphId);
+          if (resourceId && request.method === "PUT") return await handleGrantAccess(request, env, graphId, resourceId);
+          if (resourceId && request.method === "DELETE") return await handleRevokeAccess(request, env, graphId, resourceId);
         }
       }
       return notFound("Endpoint not found");
@@ -416,7 +474,10 @@ function handleInfo(env) {
       get_node: "GET /v1/graphs/:graphId/nodes/:id (requires auth + viewer+ access)",
       create_edge: "POST /v1/graphs/:graphId/edges (requires auth + editor/owner access)",
       neighbors: "GET /v1/graphs/:graphId/nodes/:id/neighbors (requires auth + viewer+ access)",
-      relations: "GET /v1/graphs/:graphId/nodes/:id/relations?to=:otherId (requires auth + viewer+ access)"
+      relations: "GET /v1/graphs/:graphId/nodes/:id/relations?to=:otherId (requires auth + viewer+ access)",
+      grant_access: "PUT /v1/graphs/:graphId/access/:userId (requires auth + owner access, upserts a collaborator's role)",
+      revoke_access: "DELETE /v1/graphs/:graphId/access/:userId (requires auth + owner access, or self-removal with graph:read)",
+      list_access: "GET /v1/graphs/:graphId/access (requires auth + viewer+ access)"
     },
     authentication: {
       type: "JWT Bearer Token",
@@ -551,6 +612,51 @@ async function handleCreateEdge(request, env, graphId) {
     properties: properties ?? null
   });
   return json({ success: true, data: edge }, 201);
+}
+function assertPermission(payload, permission) {
+  if (!Array.isArray(payload.permissions) || !payload.permissions.includes(permission)) {
+    throw new AuthError(403, `Missing required permission: ${permission}`);
+  }
+}
+async function handleGrantAccess(request, env, graphId, targetUserId) {
+  const payload = await requirePermission(request, env, "graph:write");
+  if (!env.GRAPH_DB) {
+    return internalError("Graph database not configured");
+  }
+  const graph = await requireGraphMembership(env, graphId, payload.sub, "owner");
+  if (!graph) return notFound("Graph not found");
+  const body = await request.json();
+  const { role } = body;
+  const access = await upsertGraphAccess(env.GRAPH_DB, graphId, targetUserId, role);
+  return json({ success: true, data: access });
+}
+async function handleRevokeAccess(request, env, graphId, targetUserId) {
+  const payload = await requireAuth(request, env);
+  const isSelf = payload.sub === targetUserId;
+  assertPermission(payload, isSelf ? "graph:read" : "graph:write");
+  if (!env.GRAPH_DB) {
+    return internalError("Graph database not configured");
+  }
+  if (isSelf) {
+    const graph = await getGraphById(env.GRAPH_DB, graphId);
+    if (!graph) return notFound("Graph not found");
+  } else {
+    const graph = await requireGraphMembership(env, graphId, payload.sub, "owner");
+    if (!graph) return notFound("Graph not found");
+  }
+  const removed = await deleteGraphAccess(env.GRAPH_DB, graphId, targetUserId);
+  if (!removed) return notFound("Access not found");
+  return json({ success: true });
+}
+async function handleListAccess(request, env, graphId) {
+  const payload = await requirePermission(request, env, "graph:read");
+  if (!env.GRAPH_DB) {
+    return internalError("Graph database not configured");
+  }
+  const graph = await requireGraphMembership(env, graphId, payload.sub, "viewer");
+  if (!graph) return notFound("Graph not found");
+  const access = await listGraphAccess(env.GRAPH_DB, graphId);
+  return json({ success: true, data: access, count: access.length });
 }
 export {
   index_default as default

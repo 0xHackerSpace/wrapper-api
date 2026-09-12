@@ -297,6 +297,47 @@ Authorization: Bearer {{jwtToken}}
 GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes?type=concept
 Authorization: Bearer {{jwtToken}}
 
+### --- Collaborators (graph_access: owner/editor/viewer) ---
+
+### Grant/update a collaborator's role (upsert, owner-only, requires graph:write)
+PUT {{baseUrlGraph}}/v1/graphs/{{graphId}}/access/00000000-0000-0000-0000-00000000userB
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "role": "editor"
+}
+
+### List collaborators of the graph (any role, viewer+, requires graph:read)
+GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/access
+Authorization: Bearer {{jwtToken}}
+
+### Remove a collaborator's access (owner-only when it's someone else, requires graph:write)
+DELETE {{baseUrlGraph}}/v1/graphs/{{graphId}}/access/00000000-0000-0000-0000-00000000userB
+Authorization: Bearer {{jwtToken}}
+
+### Leave a graph yourself (self-removal, only requires graph:read, no owner check)
+DELETE {{baseUrlGraph}}/v1/graphs/{{graphId}}/access/00000000-0000-0000-0000-00000000userA
+Authorization: Bearer {{jwtToken}}
+
+### Grant/revoke access to someone else as a non-owner (expect 403)
+PUT {{baseUrlGraph}}/v1/graphs/{{graphId}}/access/00000000-0000-0000-0000-00000000userB
+Content-Type: application/json
+Authorization: Bearer token-de-usuario-editor-ou-viewer-no-grafo
+
+{
+  "role": "viewer"
+}
+
+### Downgrading or removing the sole owner of the graph (expect 409, "Graph must have at least one owner")
+PUT {{baseUrlGraph}}/v1/graphs/{{graphId}}/access/00000000-0000-0000-0000-00000000userA
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "role": "viewer"
+}
+
 ### --- Casos de erro ---
 
 ### Missing auth token on a protected route (expect 401)

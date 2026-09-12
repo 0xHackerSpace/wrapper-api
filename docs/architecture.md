@@ -100,9 +100,12 @@ POST   /v1/graphs/:graphId/nodes                  - Criar entidade (requer edito
 POST   /v1/graphs/:graphId/edges                  - Criar relação entre duas entidades (requer editor/owner)
 GET    /v1/graphs/:graphId/nodes/:id/neighbors    - Listar entidades conectadas
 GET    /v1/graphs/:graphId/nodes/:id/relations?to= - Relações diretas entre duas entidades
+PUT    /v1/graphs/:graphId/access/:userId         - Conceder/atualizar papel de um colaborador (upsert, requer owner)
+DELETE /v1/graphs/:graphId/access/:userId         - Revogar acesso de alguém (requer owner) ou sair do próprio grafo (self, requer só graph:read)
+GET    /v1/graphs/:graphId/access                 - Listar colaboradores do grafo (requer viewer+)
 ```
 
-Dados em D1 dedicado (`dev-graph`, binding `GRAPH_DB`), com tabelas `graphs`, `graph_access`, `nodes`/`edges`. Índices em `(graph_id, type, label)`, `from_node_id`, `to_node_id`, `graph_access.user_id`. Constraints de integridade: `UNIQUE(from_node_id, to_node_id, relation)` (evita edges duplicadas), `ON DELETE CASCADE` (remover um grafo/node limpa nodes/edges dependentes), `CHECK(json_valid(properties))`. Todas as rotas exigem JWT Bearer, incluindo leituras; rotas sob `/v1/graphs/:graphId/*` exigem também que o `sub` do token tenha uma entrada em `graph_access` para aquele grafo (404 se o grafo não existe, 403 se existe mas o usuário não tem acesso).
+Dados em D1 dedicado (`dev-graph`, binding `GRAPH_DB`), com tabelas `graphs`, `graph_access`, `nodes`/`edges`. Índices em `(graph_id, type, label)`, `from_node_id`, `to_node_id`, `graph_access.user_id`. Constraints de integridade: `UNIQUE(from_node_id, to_node_id, relation)` (evita edges duplicadas), `ON DELETE CASCADE` (remover um grafo/node limpa nodes/edges dependentes), `CHECK(json_valid(properties))`. Todas as rotas exigem JWT Bearer, incluindo leituras; rotas sob `/v1/graphs/:graphId/*` exigem também que o `sub` do token tenha uma entrada em `graph_access` para aquele grafo (404 se o grafo não existe, 403 se existe mas o usuário não tem acesso). O modelo de colaboradores (owner/editor/viewer, via `PUT`/`DELETE`/`GET .../access`, ver [spec](specs/graph-collaborator-management.md)) segue um upsert simples por `user_id` (sem lookup de username), com a invariante de que todo grafo deve sempre ter ao menos um `owner`.
 
 ## Gerenciamento de Secrets
 

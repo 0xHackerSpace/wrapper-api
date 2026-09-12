@@ -146,6 +146,92 @@ export async function getGraphAccess(db, graphId, userId) {
   return row?.role ?? null;
 }
 
+const VALID_ROLES = ["owner", "editor", "viewer"];
+
+export async function listGraphAccess(db, graphId) {
+  if (!db) {
+    throw new Error("Database not configured");
+  }
+
+  const results = await db
+    .prepare("SELECT user_id, role, created_at FROM graph_access WHERE graph_id = ? ORDER BY created_at")
+    .bind(graphId)
+    .all();
+
+  return (results.results || []).map((row) => ({
+    user_id: row.user_id,
+    role: row.role,
+    created_at: row.created_at,
+  }));
+}
+
+async function countOwners(db, graphId) {
+  const access = await listGraphAccess(db, graphId);
+  return access.filter((a) => a.role === "owner").length;
+}
+
+// Shared invariant: a graph can never end up with zero owners. Used by both
+// the PUT downgrade path and both DELETE paths (self-removal and removal by
+// another owner) so the rule is enforced identically everywhere.
+async function assertNotLastOwner(db, graphId, currentRole, keepsOwnerRole) {
+  if (currentRole !== "owner" || keepsOwnerRole) {
+    return;
+  }
+
+  const owners = await countOwners(db, graphId);
+  if (owners <= 1) {
+    throw new ConflictError("Graph must have at least one owner");
+  }
+}
+
+export async function upsertGraphAccess(db, graphId, userId, role) {
+  if (!db) {
+    throw new Error("Database not configured");
+  }
+
+  if (!VALID_ROLES.includes(role)) {
+    throw new ValidationError(`Invalid role: must be one of ${VALID_ROLES.join(", ")}`);
+  }
+
+  const currentRole = await getGraphAccess(db, graphId, userId);
+
+  await assertNotLastOwner(db, graphId, currentRole, role === "owner");
+
+  if (currentRole) {
+    await db
+      .prepare("UPDATE graph_access SET role = ? WHERE graph_id = ? AND user_id = ?")
+      .bind(role, graphId, userId)
+      .run();
+  } else {
+    await db
+      .prepare("INSERT INTO graph_access (id, graph_id, user_id, role) VALUES (?, ?, ?, ?)")
+      .bind(crypto.randomUUID(), graphId, userId, role)
+      .run();
+  }
+
+  return { graph_id: graphId, user_id: userId, role };
+}
+
+export async function deleteGraphAccess(db, graphId, userId) {
+  if (!db) {
+    throw new Error("Database not configured");
+  }
+
+  const currentRole = await getGraphAccess(db, graphId, userId);
+  if (!currentRole) {
+    return false;
+  }
+
+  await assertNotLastOwner(db, graphId, currentRole, false);
+
+  await db
+    .prepare("DELETE FROM graph_access WHERE graph_id = ? AND user_id = ?")
+    .bind(graphId, userId)
+    .run();
+
+  return true;
+}
+
 export async function getNodeById(db, graphId, id) {
   if (!db) {
     throw new Error("Database not configured");
