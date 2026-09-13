@@ -43,6 +43,14 @@ d1_databases = {
       "migrations/0010_add_graph_containers_and_access.sql"
     ]
   }
+  chat = {
+    name                  = "dev-chat"
+    primary_location_hint = "wnam"
+    run_migrations        = true
+    migrations = [
+      "migrations/0014_create_chat_sessions.sql"
+    ]
+  }
 }
 
 workers = {
@@ -78,6 +86,11 @@ workers = {
       {
         name = "AI"
         type = "ai"
+      },
+      {
+        name         = "CHAT_DB"
+        type         = "d1"
+        resource_key = "chat"
       }
     ]
   }
