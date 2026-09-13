@@ -17,7 +17,9 @@ d1_databases = {
       "migrations/0004_add_profiles_and_permissions.sql",
       "migrations/0005_seed_roles_and_permissions.sql",
       "migrations/0008_seed_graph_permissions.sql",
-      "migrations/0009_seed_ingredient_permissions.sql"
+      "migrations/0009_seed_ingredient_permissions.sql",
+      "migrations/0011_seed_ai_permissions.sql",
+      "migrations/0012_seed_auth_stats_permission.sql"
     ]
   }
   ingredient = {

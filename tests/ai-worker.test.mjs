@@ -3,10 +3,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import worker from "../terraform/workers/ai/src/index.mjs";
+import { generateToken } from "../terraform/workers/ai/src/lib/jwt.mjs";
+
+const JWT_SECRET = "test-secret";
 
 function harness(overrides = {}) {
   const runCalls = [];
   const env = {
+    JWT_SECRET,
     AI: {
       async run(model, input) {
         runCalls.push({ model, input });
@@ -20,11 +24,16 @@ function harness(overrides = {}) {
     const response = await worker.fetch(new Request(`https://ai.test${path}`, init), env, {});
     return { status: response.status, body: await response.json() };
   };
-  const get = (path) => call(path, { method: "GET" });
-  const post = (path, body) =>
-    call(path, { method: "POST", body: JSON.stringify(body), headers: { "content-type": "application/json" } });
+  const get = (path, headers = {}) => call(path, { method: "GET", headers });
+  const post = (path, body, headers = {}) =>
+    call(path, { method: "POST", body: JSON.stringify(body), headers: { "content-type": "application/json", ...headers } });
 
   return { env, runCalls, call, get, post };
+}
+
+async function authHeader(payload = { sub: "user-1", permissions: ["ai:chat"] }) {
+  const token = await generateToken(payload, JWT_SECRET);
+  return { authorization: `Bearer ${token}` };
 }
 
 test("GET /health reports service status", async () => {
@@ -60,9 +69,12 @@ test("GET /v1/models lists available models", async () => {
 
 test("POST /v1/chat/completions returns an OpenAI-compatible response", async () => {
   const { post } = harness();
-  const { status, body } = await post("/v1/chat/completions", {
-    messages: [{ role: "user", content: "hello" }],
-  });
+  const headers = await authHeader();
+  const { status, body } = await post(
+    "/v1/chat/completions",
+    { messages: [{ role: "user", content: "hello" }] },
+    headers
+  );
 
   assert.equal(status, 200);
   assert.equal(body.object, "chat.completion");
@@ -73,36 +85,75 @@ test("POST /v1/chat/completions returns an OpenAI-compatible response", async ()
   assert.deepEqual(body.usage, { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
 });
 
-test("POST /v1/chat/completions rejects missing or empty messages", async () => {
+test("POST /v1/chat/completions requires a valid JWT with the ai:chat permission", async () => {
   const { post } = harness();
 
-  assert.equal((await post("/v1/chat/completions", {})).status, 400);
-  assert.equal((await post("/v1/chat/completions", { messages: [] })).status, 400);
-  assert.equal((await post("/v1/chat/completions", { messages: [{ role: "user" }] })).status, 400);
-  assert.equal((await post("/v1/chat/completions", { messages: [{ role: "bogus", content: "hi" }] })).status, 400);
+  const noToken = await post("/v1/chat/completions", { messages: [{ role: "user", content: "hi" }] });
+  assert.equal(noToken.status, 401);
+
+  const invalidToken = await post(
+    "/v1/chat/completions",
+    { messages: [{ role: "user", content: "hi" }] },
+    { authorization: "Bearer invalid" }
+  );
+  assert.equal(invalidToken.status, 401);
+
+  const withoutPermission = await authHeader({ sub: "user-1", permissions: [] });
+  const forbidden = await post(
+    "/v1/chat/completions",
+    { messages: [{ role: "user", content: "hi" }] },
+    withoutPermission
+  );
+  assert.equal(forbidden.status, 403);
+});
+
+test("POST /v1/chat/completions rejects missing or empty messages", async () => {
+  const { post } = harness();
+  const headers = await authHeader();
+
+  assert.equal((await post("/v1/chat/completions", {}, headers)).status, 400);
+  assert.equal((await post("/v1/chat/completions", { messages: [] }, headers)).status, 400);
+  assert.equal((await post("/v1/chat/completions", { messages: [{ role: "user" }] }, headers)).status, 400);
+  assert.equal((await post("/v1/chat/completions", { messages: [{ role: "bogus", content: "hi" }] }, headers)).status, 400);
 });
 
 test("POST /v1/chat/completions fails closed when AI binding is missing", async () => {
   const { post } = harness({ AI: undefined });
-  const { status, body } = await post("/v1/chat/completions", {
-    messages: [{ role: "user", content: "hi" }],
-  });
+  const headers = await authHeader();
+  const { status, body } = await post(
+    "/v1/chat/completions",
+    { messages: [{ role: "user", content: "hi" }] },
+    headers
+  );
 
   assert.equal(status, 500);
   assert.match(body.error.message, /AI binding/);
+});
+
+test("POST /v1/chat/completions fails closed when JWT_SECRET is missing", async () => {
+  const { post } = harness({ JWT_SECRET: undefined });
+  const { status, body } = await post("/v1/chat/completions", { messages: [{ role: "user", content: "hi" }] });
+
+  assert.equal(status, 500);
+  assert.match(body.error.message, /JWT_SECRET/);
 });
 
 test("a system message is merged into the first user message before reaching Workers AI", async () => {
   // Cloudflare Workers AI requires strict user/assistant role alternation and rejects
   // a bare "system" role (error 3030). The worker must normalize it away.
   const { post, runCalls } = harness();
+  const headers = await authHeader();
 
-  const { status } = await post("/v1/chat/completions", {
-    messages: [
-      { role: "system", content: "You are a helpful assistant." },
-      { role: "user", content: "hello" },
-    ],
-  });
+  const { status } = await post(
+    "/v1/chat/completions",
+    {
+      messages: [
+        { role: "system", content: "You are a helpful assistant." },
+        { role: "user", content: "hello" },
+      ],
+    },
+    headers
+  );
 
   assert.equal(status, 200);
   assert.equal(runCalls.length, 1);

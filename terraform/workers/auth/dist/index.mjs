@@ -225,6 +225,45 @@ function generateRandomId() {
   return crypto.randomUUID();
 }
 
+// terraform/workers/auth/src/lib/auth.mjs
+var AuthError = class extends Error {
+  constructor(status, message) {
+    super(message);
+    this.status = status;
+  }
+};
+async function extractToken(request) {
+  const authHeader = request.headers.get("authorization");
+  if (!authHeader) {
+    return null;
+  }
+  if (!authHeader.startsWith("Bearer ")) {
+    throw new AuthError(401, "Invalid authorization header format");
+  }
+  return authHeader.slice(7);
+}
+async function requireAuth(request, env) {
+  if (!env.JWT_SECRET) {
+    throw new AuthError(500, "JWT_SECRET not configured");
+  }
+  const token = await extractToken(request);
+  if (!token) {
+    throw new AuthError(401, "Missing authorization token");
+  }
+  const payload = await verifyToken(token, env.JWT_SECRET);
+  if (!payload) {
+    throw new AuthError(401, "Invalid or expired token");
+  }
+  return payload;
+}
+async function requirePermission(request, env, permission) {
+  const payload = await requireAuth(request, env);
+  if (!Array.isArray(payload.permissions) || !payload.permissions.includes(permission)) {
+    throw new AuthError(403, `Missing required permission: ${permission}`);
+  }
+  return payload;
+}
+
 // terraform/workers/auth/src/index.mjs
 var index_default = {
   async fetch(request, env, ctx) {
@@ -253,11 +292,14 @@ var index_default = {
           return handleRefresh(request, env);
         case "/stats":
           if (request.method !== "GET") return badRequest("Method not allowed");
-          return await handleStats(env);
+          return await handleStats(request, env);
         default:
           return notFound();
       }
     } catch (err) {
+      if (err instanceof AuthError) {
+        return error(err.message, err.status);
+      }
       console.error(err);
       return internalError(err.message);
     }
@@ -277,7 +319,7 @@ function handleInfo(env) {
       login: "POST /login",
       verify: "POST /verify",
       refresh: "POST /refresh",
-      stats: "GET /stats"
+      stats: "GET /stats (requires auth + auth:stats permission)"
     },
     authentication: "JWT (Bearer token)"
   });
@@ -503,7 +545,8 @@ async function handleRefresh(request, env) {
     return badRequest("Invalid request body");
   }
 }
-async function handleStats(env) {
+async function handleStats(request, env) {
+  await requirePermission(request, env, "auth:stats");
   if (!env.DB) {
     return json({
       total_users: 0,

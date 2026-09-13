@@ -4,6 +4,7 @@ import test from "node:test";
 
 import worker from "../terraform/workers/auth/src/index.mjs";
 import { hashPassword } from "../terraform/workers/auth/src/lib/password.mjs";
+import { generateToken } from "../terraform/workers/auth/src/lib/jwt.mjs";
 
 function createAuthDB({ users = [], permissionsByUser = {}, profilesByUser = {} } = {}) {
   const usersTable = [...users];
@@ -80,6 +81,11 @@ function harness(overrides = {}) {
     call(path, { method: "POST", body: JSON.stringify(body), headers: { "content-type": "application/json", ...headers } });
 
   return { env, db, call, get, post };
+}
+
+async function authHeader(payload = { sub: "user-1", username: "ianoliv", permissions: ["auth:stats"] }) {
+  const token = await generateToken(payload, JWT_SECRET);
+  return { authorization: `Bearer ${token}` };
 }
 
 async function seededUser(overrides = {}) {
@@ -260,9 +266,24 @@ test("POST /refresh issues a new access token from a refresh token", async () =>
   assert.equal(missing.status, 400);
 });
 
+test("GET /stats requires a valid JWT with the auth:stats permission", async () => {
+  const { get } = harness({ DB: null });
+
+  const noToken = await get("/stats");
+  assert.equal(noToken.status, 401);
+
+  const invalidToken = await get("/stats", { authorization: "Bearer invalid" });
+  assert.equal(invalidToken.status, 401);
+
+  const withoutPermission = await authHeader({ sub: "user-1", permissions: [] });
+  const forbidden = await get("/stats", withoutPermission);
+  assert.equal(forbidden.status, 403);
+});
+
 test("GET /stats reports counts without a database", async () => {
   const { get } = harness({ DB: null });
-  const { status, body } = await get("/stats");
+  const headers = await authHeader();
+  const { status, body } = await get("/stats", headers);
 
   assert.equal(status, 200);
   assert.equal(body.total_users, 0);
@@ -272,7 +293,8 @@ test("GET /stats reports counts without a database", async () => {
 test("GET /stats reports counts from the database", async () => {
   const user = await seededUser();
   const { get } = harness({ DB: createAuthDB({ users: [user] }) });
-  const { status, body } = await get("/stats");
+  const headers = await authHeader();
+  const { status, body } = await get("/stats", headers);
 
   assert.equal(status, 200);
   assert.equal(body.total_users, 1);

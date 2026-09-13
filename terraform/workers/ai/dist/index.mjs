@@ -130,6 +130,88 @@ function validateChatCompletionRequest(body) {
   };
 }
 
+// terraform/workers/ai/src/lib/jwt.mjs
+var encoder = new TextEncoder();
+var decoder = new TextDecoder();
+async function verifyToken(token, secret) {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3) return null;
+    const [headerEncoded, payloadEncoded, signatureEncoded] = parts;
+    const message = `${headerEncoded}.${payloadEncoded}`;
+    const expectedSignature = await sign(message, secret);
+    if (signatureEncoded !== expectedSignature) return null;
+    const payload = JSON.parse(base64urlDecode(payloadEncoded));
+    const now = Math.floor(Date.now() / 1e3);
+    if (payload.exp && payload.exp < now) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
+async function sign(message, secret) {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(message));
+  return base64url(String.fromCharCode(...new Uint8Array(signature)));
+}
+function base64url(str) {
+  return btoa(str).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
+}
+function base64urlDecode(str) {
+  str += "===".slice((str.length + 3) % 4);
+  return decoder.decode(
+    Uint8Array.from(
+      atob(str.replace(/-/g, "+").replace(/_/g, "/")),
+      (c) => c.charCodeAt(0)
+    )
+  );
+}
+
+// terraform/workers/ai/src/lib/auth.mjs
+var AuthError = class extends Error {
+  constructor(status, message) {
+    super(message);
+    this.status = status;
+  }
+};
+async function extractToken(request) {
+  const authHeader = request.headers.get("authorization");
+  if (!authHeader) {
+    return null;
+  }
+  if (!authHeader.startsWith("Bearer ")) {
+    throw new AuthError(401, "Invalid authorization header format");
+  }
+  return authHeader.slice(7);
+}
+async function requireAuth(request, env) {
+  if (!env.JWT_SECRET) {
+    throw new AuthError(500, "JWT_SECRET not configured");
+  }
+  const token = await extractToken(request);
+  if (!token) {
+    throw new AuthError(401, "Missing authorization token");
+  }
+  const payload = await verifyToken(token, env.JWT_SECRET);
+  if (!payload) {
+    throw new AuthError(401, "Invalid or expired token");
+  }
+  return payload;
+}
+async function requirePermission(request, env, permission) {
+  const payload = await requireAuth(request, env);
+  if (!Array.isArray(payload.permissions) || !payload.permissions.includes(permission)) {
+    throw new AuthError(403, `Missing required permission: ${permission}`);
+  }
+  return payload;
+}
+
 // terraform/workers/ai/src/index.mjs
 var index_default = {
   async fetch(request, env, ctx) {
@@ -146,6 +228,9 @@ var index_default = {
       }
       return notFound("Endpoint not found");
     } catch (error2) {
+      if (error2 instanceof AuthError) {
+        return json({ error: { message: error2.message, type: "invalid_request_error" } }, error2.status);
+      }
       console.error("Error:", error2);
       return internalError(error2.message);
     }
@@ -167,7 +252,7 @@ function handleInfo() {
       health: "GET /health",
       info: "GET /",
       models: "GET /v1/models",
-      chat_completions: "POST /v1/chat/completions"
+      chat_completions: "POST /v1/chat/completions (requires auth + ai:chat permission)"
     },
     documentation: "https://platform.openai.com/docs/api-reference"
   });
@@ -176,6 +261,7 @@ function handleListModels() {
   return json(getAvailableModels());
 }
 async function handleChatCompletion(request, env) {
+  await requirePermission(request, env, "ai:chat");
   if (!env.AI) {
     return internalError("AI binding not configured");
   }

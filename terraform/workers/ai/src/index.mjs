@@ -1,5 +1,6 @@
 import { json, badRequest, notFound, internalError } from "./lib/response.mjs";
 import { chatCompletion, getAvailableModels, validateChatCompletionRequest, ValidationError } from "./lib/ai.mjs";
+import { requirePermission, AuthError } from "./lib/auth.mjs";
 
 export default {
   async fetch(request, env, ctx) {
@@ -20,6 +21,9 @@ export default {
 
       return notFound("Endpoint not found");
     } catch (error) {
+      if (error instanceof AuthError) {
+        return json({ error: { message: error.message, type: "invalid_request_error" } }, error.status);
+      }
       console.error("Error:", error);
       return internalError(error.message);
     }
@@ -43,7 +47,7 @@ function handleInfo() {
       health: "GET /health",
       info: "GET /",
       models: "GET /v1/models",
-      chat_completions: "POST /v1/chat/completions",
+      chat_completions: "POST /v1/chat/completions (requires auth + ai:chat permission)",
     },
     documentation: "https://platform.openai.com/docs/api-reference",
   });
@@ -54,6 +58,8 @@ function handleListModels() {
 }
 
 async function handleChatCompletion(request, env) {
+  await requirePermission(request, env, "ai:chat");
+
   if (!env.AI) {
     return internalError("AI binding not configured");
   }

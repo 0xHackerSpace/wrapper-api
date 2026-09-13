@@ -2,6 +2,7 @@ import { generateToken, verifyToken } from "./lib/jwt.mjs";
 import { json, error, unauthorized, badRequest, notFound, internalError } from "./lib/response.mjs";
 import { getUserByUsername, updateLastLogin, logAuthAttempt, createUser, getUserPermissions, getUserProfiles } from "./lib/db.mjs";
 import { verifyPassword, hashPassword, generateRandomId } from "./lib/password.mjs";
+import { requirePermission, AuthError } from "./lib/auth.mjs";
 
 export default {
   async fetch(request, env, ctx) {
@@ -38,12 +39,15 @@ export default {
 
         case "/stats":
           if (request.method !== "GET") return badRequest("Method not allowed");
-          return await handleStats(env);
+          return await handleStats(request, env);
 
         default:
           return notFound();
       }
     } catch (err) {
+      if (err instanceof AuthError) {
+        return error(err.message, err.status);
+      }
       console.error(err);
       return internalError(err.message);
     }
@@ -65,7 +69,7 @@ function handleInfo(env) {
       login: "POST /login",
       verify: "POST /verify",
       refresh: "POST /refresh",
-      stats: "GET /stats",
+      stats: "GET /stats (requires auth + auth:stats permission)",
     },
     authentication: "JWT (Bearer token)",
   });
@@ -329,7 +333,9 @@ async function handleRefresh(request, env) {
   }
 }
 
-async function handleStats(env) {
+async function handleStats(request, env) {
+  await requirePermission(request, env, "auth:stats");
+
   if (!env.DB) {
     return json({
       total_users: 0,

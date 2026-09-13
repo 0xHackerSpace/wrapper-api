@@ -17,6 +17,10 @@ export function unauthorized(message) {
   return error(message, 401);
 }
 
+export function forbidden(message) {
+  return error(message, 403);
+}
+
 export function notFound(message = "Not found") {
   return error(message, 404);
 }
