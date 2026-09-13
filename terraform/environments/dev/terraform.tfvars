@@ -19,7 +19,8 @@ d1_databases = {
       "migrations/0008_seed_graph_permissions.sql",
       "migrations/0009_seed_ingredient_permissions.sql",
       "migrations/0011_seed_ai_permissions.sql",
-      "migrations/0012_seed_auth_stats_permission.sql"
+      "migrations/0012_seed_auth_stats_permission.sql",
+      "migrations/0013_add_graphrag_permission.sql"
     ]
   }
   ingredient = {
@@ -55,6 +56,9 @@ workers = {
         resource_key = "ingredient"
       }
     ]
+    service_bindings = [
+      { name = "GRAPH_WORKER", target_worker = "graph" }
+    ]
   }
   auth = {
     script_path        = "workers/auth/dist/index.mjs"
@@ -88,11 +92,24 @@ workers = {
       }
     ]
   }
+  graphrag = {
+    script_path        = "workers/graphrag/dist/index.mjs"
+    compatibility_date = "2026-08-24"
+    service_bindings = [
+      { name = "RAG_WORKER", target_rag = "rag" },
+      { name = "GRAPH_WORKER", target_worker = "graph" },
+      { name = "AI_WORKER", target_worker = "ai" }
+    ]
+  }
 }
 
 rag_stacks = {
   rag = {
     script_path        = "workers/rag/dist/index.mjs"
     compatibility_date = "2026-08-24"
+    service_bindings = [
+      { name = "GRAPH_WORKER", target_worker = "graph" },
+      { name = "AI_WORKER", target_worker = "ai" }
+    ]
   }
 }
