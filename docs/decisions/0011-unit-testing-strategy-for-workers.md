@@ -80,6 +80,7 @@ node --test tests/ai-worker.test.mjs  # arquivo único
 - [ ] Medir cobertura com `node --test --experimental-test-coverage`
 - [ ] Considerar Miniflare para testes de integração que precisem simular Durable Objects/Queues reais
 - [ ] Exigir teste novo para toda rota nova adicionada a um worker
+- [x] Padrão de teste para Workers convertidos a `WorkerEntrypoint` (ESM loader hook para o builtin `cloudflare:workers`) — ver [ADR 0015](0015-service-bindings-rpc-worker-communication.md)
 
 ## Referências
 

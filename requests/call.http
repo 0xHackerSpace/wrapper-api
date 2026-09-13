@@ -6,6 +6,7 @@
 @baseUrlRag=https://dev-rag.0xhackerspace.workers.dev
 @baseUrlAI=https://dev-ai.0xhackerspace.workers.dev
 @baseUrlGraph=https://dev-graph.0xhackerspace.workers.dev
+@baseUrlGraphRAG=https://dev-graphrag.0xhackerspace.workers.dev
 @graphId=COLE_AQUI_O_ID_RETORNADO_POR_POST_/v1/graphs
 @jwtToken=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIzMjhmMWE3Ny1hNGEzLTRlYTctOWNjMS03OTY1NzEyNTJhNzEiLCJ1c2VybmFtZSI6Imlhbm9saXYiLCJ0eXBlIjoiYWNjZXNzIiwicGVybWlzc2lvbnMiOlsiYXBpOmFjY2VzcyIsImFwaTphY2Nlc3MiLCJhcGk6YWNjZXNzIiwiYXBpOmFjY2VzcyIsImFwaTphY2Nlc3MiLCJhdXRoOmxvZ2luIiwiYXV0aDpsb2dpbiIsImF1dGg6bG9naW4iLCJhdXRoOmxvZ2luIiwiYXV0aDpsb2dpbiIsImF1dGg6bG9naW4iLCJhdXRoOmxvZ2luIiwiYXV0aDpsb2dpbiIsImF1dGg6bG9nb3V0IiwiYXV0aDpsb2dvdXQiLCJhdXRoOmxvZ291dCIsImF1dGg6bG9nb3V0IiwiYXV0aDpsb2dvdXQiLCJhdXRoOmxvZ291dCIsImF1dGg6bG9nb3V0IiwiZ3JhcGg6cmVhZCIsImdyYXBoOnJlYWQiLCJncmFwaDpyZWFkIiwiZ3JhcGg6d3JpdGUiLCJncmFwaDp3cml0ZSIsImluZ3JlZGllbnQ6Y3JlYXRlIiwiaW5ncmVkaWVudDpjcmVhdGUiLCJpbmdyZWRpZW50OmRlbGV0ZSIsImluZ3JlZGllbnQ6ZGVsZXRlIiwiaW5ncmVkaWVudDpyZWFkIiwiaW5ncmVkaWVudDpyZWFkIiwiaW5ncmVkaWVudDpyZWFkIiwiaW5ncmVkaWVudDp1cGRhdGUiLCJpbmdyZWRpZW50OnVwZGF0ZSIsInBlcm1pc3Npb246Y3JlYXRlIiwicGVybWlzc2lvbjpkZWxldGUiLCJwZXJtaXNzaW9uOnJlYWQiLCJwZXJtaXNzaW9uOnVwZGF0ZSIsInByb2ZpbGU6Y3JlYXRlIiwicHJvZmlsZTpkZWxldGUiLCJwcm9maWxlOnJlYWQiLCJwcm9maWxlOnVwZGF0ZSIsInJhZzppbmdlc3QiLCJyYWc6aW5nZXN0IiwicmFnOnF1ZXJ5IiwicmFnOnF1ZXJ5IiwicmFnOnF1ZXJ5IiwicmFnOnF1ZXJ5IiwidXNlcjpjcmVhdGUiLCJ1c2VyOmRlbGV0ZSIsInVzZXI6cmVhZCIsInVzZXI6cmVhZCIsInVzZXI6dXBkYXRlIl0sInByb2ZpbGVzIjpbIkFkbWluIiwiQVBJIFVzZXIiLCJHcmFwaCBVc2VyIiwiR3Vlc3QiLCJJbmdyZWRpZW50IEFkbWluIiwiSW5ncmVkaWVudCBVc2VyIiwiUkFHIFVzZXIiLCJVc2VyIl0sImlhdCI6MTc4OTIwMTMxMiwiZXhwIjoxNzg5MjA0OTEyfQ.VA7SGv-bZ6Aw3uW0Ii3GJvtJnKDFLcRkiHzUtm2KODc
 
@@ -98,6 +99,26 @@ Authorization: Bearer {{jwtToken}}
 DELETE {{baseUrlApi}}/ingredients/1a2b3c4d-5e6f-7g8h-9i0j-1k2l3m4n5o6p
 Authorization: Bearer {{jwtToken}}
 
+### Get direct recommendations for an ingredient (graph neighbors, e.g. "pairs_well_with")
+GET {{baseUrlApi}}/ingredients/1a2b3c4d-5e6f-7g8h-9i0j-1k2l3m4n5o6p/recommendations
+Authorization: Bearer {{jwtToken}}
+
+### Get direct recommendations filtered by relation
+GET {{baseUrlApi}}/ingredients/1a2b3c4d-5e6f-7g8h-9i0j-1k2l3m4n5o6p/recommendations?relation=pairs_well_with
+Authorization: Bearer {{jwtToken}}
+
+### Get indirect recommendations (multi-hop traversal via graph-worker findPaths)
+GET {{baseUrlApi}}/ingredients/1a2b3c4d-5e6f-7g8h-9i0j-1k2l3m4n5o6p/recommendations?indirect=true&maxDepth=3
+Authorization: Bearer {{jwtToken}}
+
+### Recommendations for an ingredient without a graph node yet (expect 200, empty list, not an error)
+GET {{baseUrlApi}}/ingredients/2b3c4d5e-6f7g-8h9i-0j1k-2l3m4n5o6p7q/recommendations
+Authorization: Bearer {{jwtToken}}
+
+### Recommendations for an ingredient that doesn't exist (expect 404)
+GET {{baseUrlApi}}/ingredients/00000000-0000-0000-0000-000000000000/recommendations
+Authorization: Bearer {{jwtToken}}
+
 ### ============================================
 ### RAG WORKER
 ### ============================================
@@ -108,19 +129,33 @@ Content-Type: application/json
 Authorization: Bearer {{jwtToken}}
 
 {
-  "query": "Como preparar alho?",
-  "top_k": 5
+  "question": "Como preparar alho?",
+  "topK": 5
 }
 
-### Ingest content
+### Ingest content (default graphId "rag-documents" for automatic entity/relation enrichment)
 POST {{baseUrlRag}}/ingest
 Content-Type: application/json
 Authorization: Bearer {{jwtToken}}
 
 {
-  "content": "Alho é um tempero versátil usado em muitas culinárias...",
+  "text": "Alho é um tempero versátil usado em muitas culinárias...",
+  "source": "wikipedia",
   "metadata": {
-    "source": "wikipedia",
+    "type": "ingredient"
+  }
+}
+
+### Ingest content with an explicit graphId (routes automatic enrichment to a different graph)
+POST {{baseUrlRag}}/ingest
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "text": "Alho combina bem com azeite, limão e ervas frescas em receitas mediterrâneas.",
+  "source": "wikipedia",
+  "graphId": "ingredients",
+  "metadata": {
     "type": "ingredient"
   }
 }
@@ -266,6 +301,27 @@ Authorization: Bearer {{jwtToken}}
 GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes?type=ingredient
 Authorization: Bearer {{jwtToken}}
 
+### List nodes by type and label (case-insensitive filter)
+GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes?type=ingredient&label=Alho
+Authorization: Bearer {{jwtToken}}
+
+### Update a node's label/properties
+PUT {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes/1a2b3c4d-5e6f-7g8h-9i0j-1k2l3m4n5o6p
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "label": "Alho (fresco)",
+  "properties": {
+    "origin": "Ásia Central",
+    "notes": "atualizado após colheita"
+  }
+}
+
+### Delete a node (cascades to its edges)
+DELETE {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes/1a2b3c4d-5e6f-7g8h-9i0j-1k2l3m4n5o6p
+Authorization: Bearer {{jwtToken}}
+
 ### Create edge (relation between two nodes)
 POST {{baseUrlGraph}}/v1/graphs/{{graphId}}/edges
 Content-Type: application/json
@@ -284,8 +340,34 @@ Authorization: Bearer {{jwtToken}}
 GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes/0aba4e07-e3ee-4b50-abd2-dd1f6a32e834/neighbors
 Authorization: Bearer {{jwtToken}}
 
+### List neighbors filtered by relation and node type
+GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes/0aba4e07-e3ee-4b50-abd2-dd1f6a32e834/neighbors?relation=combines_with&type=ingredient
+Authorization: Bearer {{jwtToken}}
+
 ### Check direct relations between two nodes
 GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes/1a2b3c4d-5e6f-7g8h-9i0j-1k2l3m4n5o6p/relations?to=2b3c4d5e-6f7g-8h9i-0j1k-2l3m4n5o6p7q
+Authorization: Bearer {{jwtToken}}
+
+### --- Travessia multi-hop (paths) ---
+
+### All nodes reachable from a given node (no "to", default maxDepth=3)
+GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes/0aba4e07-e3ee-4b50-abd2-dd1f6a32e834/paths
+Authorization: Bearer {{jwtToken}}
+
+### Paths between two specific nodes, up to 4 hops
+GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes/0aba4e07-e3ee-4b50-abd2-dd1f6a32e834/paths?to=node-cebolinha&maxDepth=4
+Authorization: Bearer {{jwtToken}}
+
+### Paths filtered by relation and direction (only "combines_with" edges, outgoing)
+GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes/0aba4e07-e3ee-4b50-abd2-dd1f6a32e834/paths?relation=combines_with&direction=outgoing
+Authorization: Bearer {{jwtToken}}
+
+### maxDepth above the allowed range gets clamped to 6 (no error)
+GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes/0aba4e07-e3ee-4b50-abd2-dd1f6a32e834/paths?maxDepth=99
+Authorization: Bearer {{jwtToken}}
+
+### "to" node that doesn't exist in this graph (expect 404)
+GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes/0aba4e07-e3ee-4b50-abd2-dd1f6a32e834/paths?to=00000000-0000-0000-0000-000000000000
 Authorization: Bearer {{jwtToken}}
 
 ### --- Mais casos de uso ---
@@ -440,6 +522,69 @@ Authorization: Bearer token-de-usuario-sem-acesso-a-esse-grafo
 
 ### Unknown route on graph worker (expect 404)
 GET {{baseUrlGraph}}/v1/unknown
+
+### ============================================
+### GRAPHRAG WORKER (Q&A híbrido: RAG + Graph)
+### ============================================
+
+### Health check (reporta quais dos 3 bindings - rag/graph/ai - estão configurados)
+GET {{baseUrlGraphRAG}}/health
+
+### Hybrid Q&A over the "ingredients" graph (entities from api-worker's recommendation graph, ADR 0016)
+POST {{baseUrlGraphRAG}}/v1/graphrag/query
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "question": "Com que ingredientes o alho combina bem?",
+  "graphId": "ingredients",
+  "topK": 5,
+  "maxDepth": 2
+}
+
+### Hybrid Q&A over the default "rag-documents" graph (entities enriched automatically from /ingest, ADR 0016)
+POST {{baseUrlGraphRAG}}/v1/graphrag/query
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "question": "Como o alho é usado na culinária mediterrânea?"
+}
+
+### Question with no entities found in the graph (expect 200, graphContext empty, answer based only on vector context)
+POST {{baseUrlGraphRAG}}/v1/graphrag/query
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "question": "Qual a capital da França?"
+}
+
+### Missing/empty "question" field (expect 400, ValidationError)
+POST {{baseUrlGraphRAG}}/v1/graphrag/query
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "graphId": "ingredients"
+}
+
+### Query without a token (expect 401)
+POST {{baseUrlGraphRAG}}/v1/graphrag/query
+Content-Type: application/json
+
+{
+  "question": "Com que ingredientes o alho combina bem?"
+}
+
+### Query with a valid token that lacks graphrag:query (e.g. profile User, expect 403)
+POST {{baseUrlGraphRAG}}/v1/graphrag/query
+Content-Type: application/json
+Authorization: Bearer token-de-usuario-sem-permissao-graphrag-query
+
+{
+  "question": "Com que ingredientes o alho combina bem?"
+}
 
 ### ============================================
 ### NOTES

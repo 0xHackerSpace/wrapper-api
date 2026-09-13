@@ -15,12 +15,13 @@
 ## Architecture
 
 ```
-Cloudflare Workers (5 workers) + D1 + R2 + KV + Queues
+Cloudflare Workers (6 workers) + D1 + R2 + KV + Queues
 ├── api-worker: CRUD de ingredientes
 ├── auth-worker: JWT, autenticação
 ├── rag-worker: Busca semântica (Vectorize + BGE embeddings)
 ├── ai-worker: Chat completions (OpenAI-compatível, Cloudflare AI)
-└── graph-worker: Grafo de conhecimento (nodes/edges, complemento ao RAG)
+├── graph-worker: Grafo de conhecimento (nodes/edges, complemento ao RAG)
+└── graphrag-worker: Q&A híbrido (RAG + travessia do grafo), consome os outros 3 via Service Binding
 ```
 
 **Infraestrutura como Código**: Terraform gerencia todos os recursos via HCP Terraform (workspace: `0xHackerSpace/config/wrapper-api`)
@@ -30,7 +31,7 @@ Cloudflare Workers (5 workers) + D1 + R2 + KV + Queues
 ### Build & Deploy
 
 ```bash
-npm run build:workers        # Compila todos os 5 workers (esbuild)
+npm run build:workers        # Compila todos os 6 workers (esbuild)
 terraform plan              # Valida mudanças
 terraform apply            # Deploy para Cloudflare
 ```
@@ -178,6 +179,9 @@ Decisões arquiteturais documentadas em `docs/decisions/`:
 - **0012**: Graph Worker — grafo de conhecimento
 - **0013**: Enforcement de permissões do JWT nos workers
 - **0014**: Enforcement de permissões no AI Worker e no `/stats` do Auth Worker
+- **0015**: Service Bindings + RPC (`WorkerEntrypoint`) como padrão de comunicação entre Workers
+- **0016**: Grafos por domínio, service accounts e enriquecimento fire-and-forget do grafo via RAG
+- **0017**: GraphRAG Worker — orquestrador dedicado para Q&A híbrido (RAG + Graph)
 
 Ler antes de propor mudanças significativas em arquitetura.
 

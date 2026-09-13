@@ -60,14 +60,28 @@ Cada Worker recebe bindings D1 específicos no `tfvars`; migrations rodam via `w
 Conforme [ADR 0006](decisions/0006-ingredients-crud-api.md), ingredientes são gerenciados via endpoints RESTful:
 
 ```
-GET    /ingredients      - Listar todos
-GET    /ingredients/:id  - Obter um
-POST   /ingredients      - Criar (requer: nome, slug, type)
-PUT    /ingredients/:id  - Atualizar
-DELETE /ingredients/:id  - Deletar
+GET    /ingredients                       - Listar todos
+GET    /ingredients/:id                   - Obter um
+POST   /ingredients                       - Criar (requer: nome, slug, type)
+PUT    /ingredients/:id                   - Atualizar
+DELETE /ingredients/:id                   - Deletar
+GET    /ingredients/:id/recommendations?relation=&indirect=&maxDepth= - Ingredientes relacionados via grafo de conhecimento
 ```
 
 Campos: `id` (UUID), `nome`, `slug` (UNIQUE), `type`, `reference`, `url`, `permissions`, timestamps.
+
+### Recomendações via grafo de conhecimento
+
+Conforme [ADR 0016](decisions/0016-domain-graph-service-accounts-and-fire-and-forget-enrichment.md), o `api-worker` mantém um grafo `ingredients` no `graph-worker` (Service Binding `GRAPH_WORKER`, [ADR 0015](decisions/0015-service-bindings-rpc-worker-communication.md)) sincronizado automaticamente a cada criação/edição/remoção de ingrediente: um node `{type: "ingredient", label: <nome>, properties: {ingredientId}}` por ingrediente, escrito como o service actor `svc-api-ingredients`. A sincronização roda em `ctx.waitUntil()` (best-effort, `terraform/workers/api/src/lib/graph-sync.mjs`) e nunca falha a resposta HTTP do `api-worker` se o `graph-worker` estiver indisponível.
+
+`GET /ingredients/:id/recommendations` requer `ingredient:read` e resolve o node do ingrediente por `label` (o nome) antes de consultar o grafo:
+- Sem `GRAPH_WORKER` configurado: `501`.
+- Ingrediente inexistente no D1: `404`.
+- Ingrediente existe mas ainda não tem node no grafo (lag de sincronização): `200` com lista vazia.
+- `?indirect=true`: usa `findPaths` (travessia multi-hop, [ADR 0012](decisions/0012-graph-worker-knowledge-graph.md)) em vez de `getNeighbors` (vizinhos diretos); `?relation=` e `?maxDepth=` filtram/limitam a travessia.
+- Cada vizinho é enriquecido de volta para o registro completo do ingrediente via `properties.ingredientId` + lookup no D1; se essa propriedade não resolver mais (ingrediente removido sem o node ter sido limpo ainda), cai para `{nodeId, label}`.
+
+O seed do grafo `ingredients` (criação do grafo + `graph_access` para `svc-api-ingredients`) é um passo manual pendente, ver ADR 0016.
 
 ## API de IA com OpenAI Compatibility
 
@@ -89,6 +103,32 @@ Modelos suportados:
 
 Permite integração fácil com SDKs OpenAI e ferramentas existentes sem dependências externas.
 
+## RAG Worker (retrieval-augmented generation)
+
+```
+GET    /health   - Health check
+POST   /ingest   - Indexar um documento (chunking + embeddings + Vectorize + R2)
+POST   /query    - Busca semântica + geração de resposta
+```
+
+`POST /ingest` requer `rag:ingest`, `POST /query` requer `rag:query`. `POST /ingest` aceita um campo opcional `graphId` no payload (default `"rag-documents"`) que direciona o enriquecimento automático do grafo (ver abaixo) para um grafo específico.
+
+Conforme [ADR 0015](decisions/0015-service-bindings-rpc-worker-communication.md), o `rag-worker` também é um `WorkerEntrypoint`: `fetch()` preserva integralmente o roteamento HTTP acima, e um novo método RPC `query(question, opts)` expõe a mesma lógica de busca vetorial + geração usada por `POST /query`, reaproveitável por outros Workers via Service Binding (ex.: o futuro `graphrag-worker` da Fase 4 do roadmap GraphRAG).
+
+### Enriquecimento automático do grafo
+
+Conforme [ADR 0016](decisions/0016-domain-graph-service-accounts-and-fire-and-forget-enrichment.md), cada `POST /ingest` dispara, em `ctx.waitUntil()` (fire-and-forget, depois de já ter respondido `201` ao cliente):
+1. `lib/entity-extraction.mjs`: extrai entidades/relações do texto (limitado a 8000 caracteres) via `env.AI_WORKER.chat(...)` (RPC), pedindo um JSON estrito. Parsing defensivo — nunca lança; JSON malformado ou resposta inesperada do modelo degrada para `{entities: [], relations: []}`, com o erro logado.
+2. `lib/graph-sync.mjs`: grava as entidades/relações extraídas no `graph-worker` (`upsertNode`/`createEdge` via RPC) como o service actor `svc-rag-enrichment`. Conflito de aresta duplicada (reingestão do mesmo documento) é tratado como sucesso silencioso.
+
+Esse pipeline é best-effort: uma falha em qualquer etapa (extração ou sync) nunca atrasa nem derruba a resposta de `/ingest`, só é visível via log. O seed do grafo `rag-documents` (criação do grafo + `graph_access` para `svc-rag-enrichment`) é um passo manual pendente, ver ADR 0016.
+
+## Comunicação entre Workers (Service Bindings + RPC)
+
+Conforme [ADR 0015](decisions/0015-service-bindings-rpc-worker-communication.md), Workers que precisam chamar outro Worker da mesma conta usam **Service Bindings + RPC** (`WorkerEntrypoint`, de `cloudflare:workers`), não HTTP fetch com token. `workers` e `rag_stacks` ganham um campo opcional `service_bindings` (`{name, target_worker|target_rag, entrypoint}`) no Terraform, resolvido via locals puros (`worker_script_names`/`rag_script_names`) para não depender de outputs de módulo e evitar ciclos no grafo de dependências.
+
+`ai-worker` é o primeiro Worker convertido: `fetch()` mantém 100% do roteamento HTTP existente (incluindo a permission `ai:chat`, [ADR 0014](decisions/0014-ai-chat-and-auth-stats-permission-enforcement.md)); um novo método RPC `chat(messages, options)` fica disponível apenas para Workers que o chamam via Service Binding, sem checagem de permissão adicional nesse caminho — a plataforma já restringe o acesso a Workers da mesma conta.
+
 ## Grafo de Conhecimento (Graph Worker)
 
 Conforme [ADR 0012](decisions/0012-graph-worker-knowledge-graph.md), o Graph Worker complementa o `rag-worker` representando entidades e relações explícitas extraídas de documentos. Cada grafo é um container isolado (`graphs`): nodes/edges pertencem a exatamente um grafo, e o acesso a cada grafo é controlado por `graph_access` (papéis `owner`/`editor`/`viewer`), independente da permission RBAC `graph:read`/`graph:write` do JWT — a permission libera o uso da feature, o papel no `graph_access` libera o acesso àquele grafo específico:
@@ -98,17 +138,40 @@ GET    /health                                    - Health check
 POST   /v1/graphs                                 - Criar grafo (criador vira owner)
 GET    /v1/graphs                                 - Listar grafos que o usuário tem acesso
 GET    /v1/graphs/:graphId/nodes/:id              - Buscar entidade
-GET    /v1/graphs/:graphId/nodes?type=X           - Listar entidades por tipo
+GET    /v1/graphs/:graphId/nodes?type=X&label=Y   - Listar entidades por tipo (label opcional, case-insensitive)
 POST   /v1/graphs/:graphId/nodes                  - Criar entidade (requer editor/owner)
+PUT    /v1/graphs/:graphId/nodes/:id              - Atualizar label/properties de uma entidade (requer editor/owner)
+DELETE /v1/graphs/:graphId/nodes/:id              - Remover entidade, cascateando para suas edges (requer editor/owner)
 POST   /v1/graphs/:graphId/edges                  - Criar relação entre duas entidades (requer editor/owner)
-GET    /v1/graphs/:graphId/nodes/:id/neighbors    - Listar entidades conectadas
+GET    /v1/graphs/:graphId/nodes/:id/neighbors?relation=&type= - Listar entidades conectadas (filtros opcionais)
 GET    /v1/graphs/:graphId/nodes/:id/relations?to= - Relações diretas entre duas entidades
+GET    /v1/graphs/:graphId/nodes/:id/paths?to=&maxDepth=&relation=&direction= - Travessia multi-hop (ver abaixo)
 PUT    /v1/graphs/:graphId/access/:userId         - Conceder/atualizar papel de um colaborador (upsert, requer owner)
 DELETE /v1/graphs/:graphId/access/:userId         - Revogar acesso de alguém (requer owner) ou sair do próprio grafo (self, requer só graph:read)
 GET    /v1/graphs/:graphId/access                 - Listar colaboradores do grafo (requer viewer+)
 ```
 
-Dados em D1 dedicado (`dev-graph`, binding `GRAPH_DB`), com tabelas `graphs`, `graph_access`, `nodes`/`edges`. Índices em `(graph_id, type, label)`, `from_node_id`, `to_node_id`, `graph_access.user_id`. Constraints de integridade: `UNIQUE(from_node_id, to_node_id, relation)` (evita edges duplicadas), `ON DELETE CASCADE` (remover um grafo/node limpa nodes/edges dependentes), `CHECK(json_valid(properties))`. Todas as rotas exigem JWT Bearer, incluindo leituras; rotas sob `/v1/graphs/:graphId/*` exigem também que o `sub` do token tenha uma entrada em `graph_access` para aquele grafo (404 se o grafo não existe, 403 se existe mas o usuário não tem acesso). O modelo de colaboradores (owner/editor/viewer, via `PUT`/`DELETE`/`GET .../access`, ver [spec](specs/graph-collaborator-management.md)) segue um upsert simples por `user_id` (sem lookup de username), com a invariante de que todo grafo deve sempre ter ao menos um `owner`.
+`GET .../paths` faz travessia multi-hop via recursive CTE do D1/SQLite, com detecção de ciclo e `maxDepth` limitado a 1–6 (default 3; `LIMIT 200` linhas por segurança). Sem `?to=`, retorna todos os nodes alcançáveis a partir de `:id` (modo `reachable`); com `?to=`, retorna os caminhos entre os dois nodes (modo `paths`). `?relation=` filtra por tipo de relação e `?direction=` controla o sentido das edges seguidas (`outgoing`/`incoming`/`both`).
+
+Dados em D1 dedicado (`dev-graph`, binding `GRAPH_DB`), com tabelas `graphs`, `graph_access`, `nodes`/`edges`. Índices em `(graph_id, type, label)`, `from_node_id`, `to_node_id`, `graph_access.user_id`. Constraints de integridade: `UNIQUE(from_node_id, to_node_id, relation)` (evita edges duplicadas), `ON DELETE CASCADE` (remover um grafo/node limpa nodes/edges dependentes), `CHECK(json_valid(properties))`. Todas as rotas exigem JWT Bearer, incluindo leituras; rotas sob `/v1/graphs/:graphId/*` exigem também que o `sub` do token tenha uma entrada em `graph_access` para aquele grafo (404 se o grafo não existe, 403 se existe mas o usuário não tem acesso). O modelo de colaboradores (owner/editor/viewer, via `PUT`/`DELETE`/`GET .../access`, ver [spec](specs/graph-collaborator-management.md)) segue um upsert simples por `user_id` (sem lookup de username), com a invariante de que todo grafo deve sempre ter ao menos um `owner`. Conforme [ADR 0015](decisions/0015-service-bindings-rpc-worker-communication.md), o `graph-worker` também é um `WorkerEntrypoint`: além do `fetch()` HTTP acima, expõe métodos RPC (`upsertNode`, `updateNode`, `deleteNode`, `createEdge`, `getNeighbors`, `findPaths`, `findNodeByLabel`) para outros Workers via Service Binding, recebendo um `actorSub` explícito e checando apenas o papel do usuário em `graph_access` — sem repetir a permission RBAC `graph:read`/`graph:write`, que fica exclusiva do caminho HTTP. Conforme [ADR 0016](decisions/0016-domain-graph-service-accounts-and-fire-and-forget-enrichment.md), esse caminho RPC é hoje consumido por dois service actors fixos, cada um dono de um grafo de domínio: `svc-api-ingredients` (grafo `ingredients`, recomendações do `api-worker`) e `svc-rag-enrichment` (grafo `rag-documents`, enriquecimento automático do `rag-worker`).
+
+## GraphRAG Worker (Q&A híbrido)
+
+Conforme [ADR 0017](decisions/0017-graphrag-worker-hybrid-qa-orchestrator.md), `graphrag-worker` é o sexto Worker do projeto: combina o contexto vetorial do `rag-worker` com o contexto estrutural do `graph-worker` para responder perguntas, gerando a resposta final via `ai-worker`. Diferente de `ai`/`graph`/`rag` (ADR 0015), ele **não** é um `WorkerEntrypoint` — é HTTP-only, no topo da cadeia de Service Bindings: consome `RAG_WORKER`, `GRAPH_WORKER` e `AI_WORKER`, mas nada o chama via RPC.
+
+```
+GET    /health                - Health check (reporta quais dos 3 bindings estão configurados)
+POST   /v1/graphrag/query     - Q&A híbrido (RAG + travessia do grafo)
+```
+
+`POST /v1/graphrag/query` requer a permission `graphrag:query` (migration `0013_add_graphrag_permission.sql`, atribuída aos profiles `Admin` e `RAG User`). Body: `{ question, graphId="rag-documents", topK?, maxDepth?=2 }`. Fluxo de 4 passos:
+
+1. `env.RAG_WORKER.query(question, {topK})` (RPC) — busca vetorial + geração, retorna `{question, answer, sources}`. Chamada essencial: erro propaga como `500`.
+2. Extrai entidades candidatas da pergunta via `env.AI_WORKER.chat(...)` (RPC), usando um prompt local (`lib/entity-extraction.mjs`) — uma variante enxuta da extração do `rag-worker` (só `entities`, sem `relations`), deliberadamente duplicada em vez de importada entre os dois Workers, já que cada um é compilado e deployado de forma independente ([ADR 0017](decisions/0017-graphrag-worker-hybrid-qa-orchestrator.md)). Essa etapa nunca lança — degrada para `{entities: []}`.
+3. Para cada entidade candidata: `env.GRAPH_WORKER.findNodeByLabel(graphId, sub, type, label)` seguido de `env.GRAPH_WORKER.findPaths(graphId, sub, nodeId, {maxDepth})` (RPC) — usa o `sub` do **próprio usuário autenticado** (extraído do JWT do request), não um service account, para que a ACL fina do grafo (`graph_access`) seja respeitada em nome de quem pergunta. Falha em qualquer uma dessas chamadas (node não encontrado, sem acesso ao grafo, erro de RPC) descarta só aquela entidade — degradação graciosa, nunca falha a pergunta inteira. Sem nenhuma entidade resolvida, a resposta final ainda é gerada normalmente usando só o contexto vetorial.
+4. Monta um prompt combinando `ragResult.answer` (contexto vetorial já sintetizado) com o contexto do grafo formatado como texto legível (ex.: `Alho -[combines_with]-> Cebola (distance 1)`), e envia a `env.AI_WORKER.chat(...)` (RPC) para gerar a resposta final. Chamada essencial: erro propaga como `500`.
+
+Resposta: `{ question, answer, sources, graphContext }`.
 
 ## Gerenciamento de Secrets
 
