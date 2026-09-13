@@ -183,6 +183,7 @@ Decisões arquiteturais documentadas em `docs/decisions/`:
 - **0016**: Grafos por domínio, service accounts e enriquecimento fire-and-forget do grafo via RAG
 - **0017**: GraphRAG Worker — orquestrador dedicado para Q&A híbrido (RAG + Graph)
 - **0018**: GitHub Actions — CI e CD para `dev`
+- **0019**: Sessões de Chat no `ai-worker` (D1 `dev-chat`, endpoints `/v1/sessions/*`)
 
 Ler antes de propor mudanças significativas em arquitetura.
 

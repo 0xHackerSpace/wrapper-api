@@ -1,6 +1,6 @@
 # Diagrama de Entidades dos Bancos de Dados
 
-Este documento mapeia as tabelas dos três D1 do projeto (`dev-auth`, `dev-ingredient`, `dev-graph`, ver [ADR 0004](decisions/0004-d1-multiple-databases.md)) e como elas se relacionam. Cada D1 é isolado — não há `FOREIGN KEY` entre bancos diferentes; onde uma tabela referencia um `user_id`/`created_by` de outro D1 (ex.: `graph_access.user_id` → `dev-auth.users.id`), a relação é apenas lógica, aplicada no código do worker, não pelo SQLite.
+Este documento mapeia as tabelas dos quatro D1 do projeto (`dev-auth`, `dev-ingredient`, `dev-graph`, `dev-chat`, ver [ADR 0004](decisions/0004-d1-multiple-databases.md)) e como elas se relacionam. Cada D1 é isolado — não há `FOREIGN KEY` entre bancos diferentes; onde uma tabela referencia um `user_id`/`created_by` de outro D1 (ex.: `graph_access.user_id` → `dev-auth.users.id`), a relação é apenas lógica, aplicada no código do worker, não pelo SQLite.
 
 ## dev-auth
 
@@ -150,6 +150,37 @@ Notas:
 - `properties` em `nodes`/`edges` é validado via `CHECK(json_valid(properties))`.
 - Multi-tenancy por domínio (ADR 0016): grafos como `ingredients` (dono lógico `svc-api-ingredients`) e `rag-documents` (dono lógico `svc-rag-enrichment`) são apenas linhas em `graphs`, sem tabela própria — a segregação é 100% via `graph_id`.
 
+## dev-chat
+
+Sessões de chat do `ai-worker`, isoladas do fluxo stateless de `/v1/chat/completions` ([ADR 0019](decisions/0019-ai-worker-chat-sessions.md)). Migration: 0014.
+
+```mermaid
+erDiagram
+    chat_sessions ||--o{ chat_messages : "contém"
+
+    chat_sessions {
+        text id PK
+        text user_id "logico, dev-auth.users.id"
+        text title
+        datetime created_at
+        datetime updated_at
+    }
+
+    chat_messages {
+        text id PK
+        text session_id FK
+        text role "user | assistant"
+        text content
+        datetime created_at
+    }
+```
+
+Notas:
+- `chat_messages.session_id` é `ON DELETE CASCADE` a partir de `chat_sessions` (D1 aplica `PRAGMA foreign_keys`, diferente do SQLite padrão).
+- `chat_sessions.user_id` não tem FK física para `dev-auth.users` (D1s são isolados); toda operação valida `user_id == sub` do JWT no código do worker, nunca no schema.
+- Sem tabela de ACL — sessão é sempre privada ao dono, sem modelo de colaboradores como `graph_access`.
+- Índices em `chat_sessions.user_id` e `chat_messages.session_id`.
+
 ## Relações lógicas entre bancos (sem FK física)
 
 ```mermaid
@@ -157,6 +188,7 @@ erDiagram
     users ||--o{ graph_access : "user_id (logico)"
     users ||--o{ graphs : "created_by (logico)"
     ingredients ||--o| nodes : "properties.ingredientId (logico)"
+    users ||--o{ chat_sessions : "user_id (logico)"
 ```
 
-`rag-worker` (Vectorize, fora do D1) e `graphrag-worker` (orquestrador sem estado próprio) não possuem tabelas — não aparecem nos diagramas acima.
+`rag-worker` (Vectorize, fora do D1) e `graphrag-worker` (orquestrador sem estado próprio) não possuem tabelas — não aparecem nos diagramas acima. `dev-chat` é exclusivo do `ai-worker` — nenhum outro worker acessa essas tabelas, diretamente ou via RPC.
