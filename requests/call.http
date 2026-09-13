@@ -8,6 +8,7 @@
 @baseUrlGraph=https://dev-graph.0xhackerspace.workers.dev
 @baseUrlGraphRAG=https://dev-graphrag.0xhackerspace.workers.dev
 @graphId=COLE_AQUI_O_ID_RETORNADO_POR_POST_/v1/graphs
+@sessionId=COLE_AQUI_O_ID_RETORNADO_POR_POST_/v1/sessions
 @jwtToken=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIzMjhmMWE3Ny1hNGEzLTRlYTctOWNjMS03OTY1NzEyNTJhNzEiLCJ1c2VybmFtZSI6Imlhbm9saXYiLCJ0eXBlIjoiYWNjZXNzIiwicGVybWlzc2lvbnMiOlsiYXBpOmFjY2VzcyIsImFwaTphY2Nlc3MiLCJhcGk6YWNjZXNzIiwiYXBpOmFjY2VzcyIsImFwaTphY2Nlc3MiLCJhdXRoOmxvZ2luIiwiYXV0aDpsb2dpbiIsImF1dGg6bG9naW4iLCJhdXRoOmxvZ2luIiwiYXV0aDpsb2dpbiIsImF1dGg6bG9naW4iLCJhdXRoOmxvZ2luIiwiYXV0aDpsb2dpbiIsImF1dGg6bG9nb3V0IiwiYXV0aDpsb2dvdXQiLCJhdXRoOmxvZ291dCIsImF1dGg6bG9nb3V0IiwiYXV0aDpsb2dvdXQiLCJhdXRoOmxvZ291dCIsImF1dGg6bG9nb3V0IiwiZ3JhcGg6cmVhZCIsImdyYXBoOnJlYWQiLCJncmFwaDpyZWFkIiwiZ3JhcGg6d3JpdGUiLCJncmFwaDp3cml0ZSIsImluZ3JlZGllbnQ6Y3JlYXRlIiwiaW5ncmVkaWVudDpjcmVhdGUiLCJpbmdyZWRpZW50OmRlbGV0ZSIsImluZ3JlZGllbnQ6ZGVsZXRlIiwiaW5ncmVkaWVudDpyZWFkIiwiaW5ncmVkaWVudDpyZWFkIiwiaW5ncmVkaWVudDpyZWFkIiwiaW5ncmVkaWVudDp1cGRhdGUiLCJpbmdyZWRpZW50OnVwZGF0ZSIsInBlcm1pc3Npb246Y3JlYXRlIiwicGVybWlzc2lvbjpkZWxldGUiLCJwZXJtaXNzaW9uOnJlYWQiLCJwZXJtaXNzaW9uOnVwZGF0ZSIsInByb2ZpbGU6Y3JlYXRlIiwicHJvZmlsZTpkZWxldGUiLCJwcm9maWxlOnJlYWQiLCJwcm9maWxlOnVwZGF0ZSIsInJhZzppbmdlc3QiLCJyYWc6aW5nZXN0IiwicmFnOnF1ZXJ5IiwicmFnOnF1ZXJ5IiwicmFnOnF1ZXJ5IiwicmFnOnF1ZXJ5IiwidXNlcjpjcmVhdGUiLCJ1c2VyOmRlbGV0ZSIsInVzZXI6cmVhZCIsInVzZXI6cmVhZCIsInVzZXI6dXBkYXRlIl0sInByb2ZpbGVzIjpbIkFkbWluIiwiQVBJIFVzZXIiLCJHcmFwaCBVc2VyIiwiR3Vlc3QiLCJJbmdyZWRpZW50IEFkbWluIiwiSW5ncmVkaWVudCBVc2VyIiwiUkFHIFVzZXIiLCJVc2VyIl0sImlhdCI6MTc4OTIwMTMxMiwiZXhwIjoxNzg5MjA0OTEyfQ.VA7SGv-bZ6Aw3uW0Ii3GJvtJnKDFLcRkiHzUtm2KODc
 
 ### ============================================
@@ -228,6 +229,34 @@ Authorization: Bearer token-de-usuario-sem-permissao-ai-chat
     }
   ]
 }
+
+### --- Sessões de chat (ai:chat, mesmo dono via sub do JWT) ---
+
+### Create a chat session (empty, title: null)
+POST {{baseUrlAI}}/v1/sessions
+Authorization: Bearer {{jwtToken}}
+
+### List sessions of the authenticated user (ordered by updated_at desc)
+GET {{baseUrlAI}}/v1/sessions
+Authorization: Bearer {{jwtToken}}
+
+### Get a session + full message history (404 if it doesn't exist or belongs to someone else)
+GET {{baseUrlAI}}/v1/sessions/{{sessionId}}
+Authorization: Bearer {{jwtToken}}
+
+### Send a message in a session (persists user+assistant turn, title auto-filled on first message)
+POST {{baseUrlAI}}/v1/sessions/{{sessionId}}/messages
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "content": "Explique como fazer uma receita de alho",
+  "model": "@cf/mistral/mistral-7b-instruct-v0.1"
+}
+
+### Delete a session (cascades to its messages)
+DELETE {{baseUrlAI}}/v1/sessions/{{sessionId}}
+Authorization: Bearer {{jwtToken}}
 
 ### ============================================
 ### GRAPH WORKER (knowledge graph)

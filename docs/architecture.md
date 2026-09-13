@@ -52,6 +52,7 @@ Conforme [ADR 0004](decisions/0004-d1-multiple-databases.md), usamos múltiplos 
 - **dev-auth**: Usuários, logs, profiles, permissões (5 migrations)
 - **dev-ingredient**: Ingredientes (1 migration)
 - **dev-graph**: Nodes e edges do grafo de conhecimento (1 migration)
+- **dev-chat**: Sessões e mensagens de chat, exclusivo do `ai-worker` (1 migration, ver [ADR 0019](decisions/0019-ai-worker-chat-sessions.md))
 
 Cada Worker recebe bindings D1 específicos no `tfvars`; migrations rodam via `wrangler d1 execute --remote`.
 
@@ -102,6 +103,20 @@ Modelos suportados:
 - `@cf/baai/bge-base-en-v1.5` (embeddings)
 
 Permite integração fácil com SDKs OpenAI e ferramentas existentes sem dependências externas.
+
+### Sessões de chat
+
+Conforme [ADR 0019](decisions/0019-ai-worker-chat-sessions.md), o `ai-worker` também mantém sessões de chat persistidas em D1 dedicado (`dev-chat`, binding `CHAT_DB`), separado do fluxo stateless de `/v1/chat/completions`:
+
+```
+POST   /v1/sessions                 - Cria sessão vazia (title: null)
+GET    /v1/sessions                 - Lista sessões do usuário autenticado, ordenadas por updated_at desc
+GET    /v1/sessions/:id             - Sessão + histórico completo de mensagens
+POST   /v1/sessions/:id/messages    - Envia mensagem, persiste turno completo (user + assistant)
+DELETE /v1/sessions/:id             - Remove sessão e mensagens (cascade)
+```
+
+Todas exigem JWT Bearer com a permission `ai:chat` (a mesma de `/v1/chat/completions`, nenhuma nova permission foi criada) e derivam o dono da sessão do `sub` do JWT; sessão de outro usuário ou inexistente retorna `404` em ambos os casos (não vaza existência). Histórico completo é sempre persistido, mas só as últimas 20 mensagens da sessão são enviadas como contexto para `AI.run()` em cada nova mensagem.
 
 ## RAG Worker (retrieval-augmented generation)
 
