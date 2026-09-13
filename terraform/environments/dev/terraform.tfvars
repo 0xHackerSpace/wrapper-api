@@ -48,7 +48,8 @@ d1_databases = {
     primary_location_hint = "wnam"
     run_migrations        = true
     migrations = [
-      "migrations/0014_create_chat_sessions.sql"
+      "migrations/0014_create_chat_sessions.sql",
+      "migrations/0015_add_chat_access.sql"
     ]
   }
 }
