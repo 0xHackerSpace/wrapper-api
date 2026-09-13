@@ -96,8 +96,8 @@ Cada worker afetado ganhou cobertura para o caso 403 (JWT válido, permission au
 ## Próximos Passos
 
 - [ ] Rodar `terraform apply` para aplicar as migrations 0008 e 0009 em `dev-auth` (pendente de confirmação)
-- [ ] Decidir se `ai-worker` deve ganhar autenticação/permission própria (hoje é totalmente público)
-- [ ] Decidir se `GET /stats` do `auth-worker` deve exigir alguma permission (hoje é público)
+- [x] Decidir se `ai-worker` deve ganhar autenticação/permission própria — feito em [ADR 0014](0014-ai-chat-and-auth-stats-permission-enforcement.md) (`ai:chat`)
+- [x] Decidir se `GET /stats` do `auth-worker` deve exigir alguma permission — feito em [ADR 0014](0014-ai-chat-and-auth-stats-permission-enforcement.md) (`auth:stats`)
 - [ ] Atribuir os profiles `Graph User`, `Ingredient User`/`Ingredient Admin` a usuários reais via `user_profiles` (hoje só existem os dados; nenhum usuário seed foi migrado para eles)
 - [ ] Considerar extrair `lib/auth.mjs` para um pacote compartilhado se o número de workers crescer e a duplicação começar a doer
 

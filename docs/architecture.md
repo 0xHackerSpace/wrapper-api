@@ -33,9 +33,10 @@ O projeto implementa autenticação JWT e controle de acesso baseado em papéis 
 
 **Recursos e Ações:**
 - `user`, `profile`, `permission`: CRUD completo
-- `auth`: login, logout
+- `auth`: login, logout, stats (`GET /stats` do auth-worker requer `auth:stats`, ver [ADR 0014](decisions/0014-ai-chat-and-auth-stats-permission-enforcement.md))
 - `api`: access
 - `rag`: ingest, query
+- `ai`: chat (`POST /v1/chat/completions` requer `ai:chat`, ver [ADR 0014](decisions/0014-ai-chat-and-auth-stats-permission-enforcement.md))
 
 **Profiles Predefinidos:**
 - Admin (17 permissões)
@@ -78,6 +79,8 @@ POST   /v1/chat/completions   - Chat completion (compatível com OpenAI)
 GET    /health                - Health check
 GET    /                       - Service info
 ```
+
+`GET /v1/models`, `GET /health` e `GET /` continuam públicos. `POST /v1/chat/completions` exige JWT Bearer com a permission `ai:chat` (hoje atribuída só ao profile `Admin`), conforme [ADR 0014](decisions/0014-ai-chat-and-auth-stats-permission-enforcement.md).
 
 Modelos suportados:
 - `@cf/meta/llama-2-7b-chat-int8` (padrão)

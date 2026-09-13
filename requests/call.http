@@ -36,6 +36,17 @@ Content-Type: application/json
 POST {{baseUrlAuth}}/logout
 Authorization: Bearer {{jwtToken}}
 
+### Get aggregate user stats (requires auth:stats permission, Admin only)
+GET {{baseUrlAuth}}/stats
+Authorization: Bearer {{jwtToken}}
+
+### Get stats without a token (expect 401)
+GET {{baseUrlAuth}}/stats
+
+### Get stats with a valid token that lacks auth:stats (e.g. profile User, expect 403)
+GET {{baseUrlAuth}}/stats
+Authorization: Bearer token-de-usuario-sem-permissao-auth-stats
+
 ### ============================================
 ### INGREDIENTS API
 ### ============================================
@@ -118,12 +129,13 @@ Authorization: Bearer {{jwtToken}}
 ### AI WORKER (OpenAI-compatible)
 ### ============================================
 
-### List available models
+### List available models (public, no auth required)
 GET {{baseUrlAI}}/v1/models
 
-### Chat completion (with system instruction)
+### Chat completion (with system instruction, requires ai:chat permission, Admin only)
 POST {{baseUrlAI}}/v1/chat/completions
 Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
 
 {
   "model": "@cf/mistral/mistral-7b-instruct-v0.1",
@@ -141,9 +153,37 @@ Content-Type: application/json
   "max_tokens": 512
 }
 
-### Chat completion (minimal)
+### Chat completion (minimal, requires ai:chat permission, Admin only)
 POST {{baseUrlAI}}/v1/chat/completions
 Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Explique como fazer uma receita de alho"
+    }
+  ]
+}
+
+### Chat completion without a token (expect 401)
+POST {{baseUrlAI}}/v1/chat/completions
+Content-Type: application/json
+
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Explique como fazer uma receita de alho"
+    }
+  ]
+}
+
+### Chat completion with a valid token that lacks ai:chat (e.g. profile User, expect 403)
+POST {{baseUrlAI}}/v1/chat/completions
+Content-Type: application/json
+Authorization: Bearer token-de-usuario-sem-permissao-ai-chat
 
 {
   "messages": [

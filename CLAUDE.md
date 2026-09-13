@@ -3,6 +3,8 @@
 ## claude config
 - sempre que possivel delege assuntos de criacao ou edicao do dos workers , dentro da pasta `terraform/workers/{worker}/src/` use o sub agent `worker-dev` para lidar com a criacao de endpoints, rotas, logica de negocio e testes unitarios.
 - para assuntos de terraform, infraestrutura, banco de dados, autenticação e permissões use o sub agent `infra-dev` para lidar com a criação de recursos, migrations, variáveis sensíveis
+- apos executar os sub-agents: "worker-dev" ou "infra-dev", sempre que possivel, execute o sub-agent "doc-dev" para atualizar a documentação, ADRs e exemplos de API.
+
 
 
 
@@ -175,6 +177,7 @@ Decisões arquiteturais documentadas em `docs/decisions/`:
 - **0011**: Estratégia de testes unitários para workers
 - **0012**: Graph Worker — grafo de conhecimento
 - **0013**: Enforcement de permissões do JWT nos workers
+- **0014**: Enforcement de permissões no AI Worker e no `/stats` do Auth Worker
 
 Ler antes de propor mudanças significativas em arquitetura.
 
