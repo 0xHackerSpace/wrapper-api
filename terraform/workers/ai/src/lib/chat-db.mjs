@@ -1,13 +1,24 @@
 // D1 access for chat sessions (dev-chat, binding CHAT_DB). See
-// docs/specs/chat-sessions.md for the schema and endpoint contracts this
-// module backs. Reuses ai.mjs's ValidationError instead of declaring a
-// second one, mirroring how graph-db.mjs reuses AuthError from auth.mjs
-// within the same worker.
+// docs/specs/chat-sessions.md and docs/specs/chat-sessions-sharing-and-pagination.md
+// for the schema and endpoint contracts this module backs. Reuses ai.mjs's
+// ValidationError instead of declaring a second one, mirroring how
+// graph-db.mjs reuses AuthError from auth.mjs within the same worker.
+// ConflictError, ROLE_RANK, requireRole() and the access CRUD helpers below
+// mirror graph-db.mjs's ACL model (owner/editor/viewer, "always >=1 owner"
+// invariant) adapted to chat_access instead of graph_access.
+import { AuthError } from "./auth.mjs";
 import { ValidationError } from "./ai.mjs";
 
 export { ValidationError };
+export class ConflictError extends Error {}
+
+export const ROLE_RANK = { viewer: 1, editor: 2, owner: 3 };
+const VALID_ROLES = ["owner", "editor", "viewer"];
 
 const CONTEXT_WINDOW_SIZE = 20;
+const DEFAULT_PAGE_SIZE = 20;
+const MAX_PAGE_SIZE = 100;
+const MANUAL_TITLE_MAX_LENGTH = 200;
 
 function mapSessionRow(row) {
   if (!row) return null;
@@ -17,6 +28,7 @@ function mapSessionRow(row) {
     title: row.title ?? null,
     created_at: row.created_at,
     updated_at: row.updated_at,
+    ...(row.role !== undefined ? { role: row.role } : {}),
   };
 }
 
@@ -31,6 +43,33 @@ function mapMessageRow(row) {
   };
 }
 
+// Opaque keyset-pagination cursor: plain base64 of "<value>|<id>" (not
+// base64url -- docs/specs/chat-sessions-sharing-and-pagination.md just says
+// "base64", unlike jwt.mjs which needs the url-safe variant for URLs).
+function encodeCursor(value, id) {
+  return btoa(`${value}|${id}`);
+}
+
+function decodeCursor(cursor) {
+  if (!cursor) return null;
+  try {
+    const decoded = atob(cursor);
+    const separatorIndex = decoded.lastIndexOf("|");
+    if (separatorIndex === -1) return null;
+    return { value: decoded.slice(0, separatorIndex), id: decoded.slice(separatorIndex + 1) };
+  } catch {
+    return null;
+  }
+}
+
+function clampLimit(limit) {
+  const parsed = Number(limit);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return DEFAULT_PAGE_SIZE;
+  }
+  return Math.min(MAX_PAGE_SIZE, Math.trunc(parsed));
+}
+
 export async function createSession(db, { userId }) {
   if (!db) {
     throw new Error("Database not configured");
@@ -40,54 +79,107 @@ export async function createSession(db, { userId }) {
 
   await db.prepare("INSERT INTO chat_sessions (id, user_id) VALUES (?, ?)").bind(id, userId).run();
 
-  return getSessionForUser(db, id, userId);
+  // The creator becomes the sole owner in chat_access -- same pattern as
+  // createGraph() in graph-db.mjs. D1's HTTP API has no real multi-statement
+  // transaction anyway, so this stays two sequential .run() calls rather than
+  // reaching for .batch() (no other worker in this repo uses .batch() either).
+  await db
+    .prepare("INSERT INTO chat_access (id, session_id, user_id, role) VALUES (?, ?, ?, ?)")
+    .bind(crypto.randomUUID(), id, userId, "owner")
+    .run();
+
+  const session = await getSessionById(db, id);
+  return { ...session, role: "owner" };
 }
 
-export async function listSessionsForUser(db, userId) {
-  if (!db) {
-    throw new Error("Database not configured");
-  }
-
-  const results = await db
-    .prepare(
-      "SELECT id, user_id, title, created_at, updated_at FROM chat_sessions WHERE user_id = ? ORDER BY updated_at DESC"
-    )
-    .bind(userId)
-    .all();
-
-  return (results.results || []).map(mapSessionRow);
-}
-
-// Ownership is enforced in the query itself (user_id = ?), not checked
-// afterwards -- callers get null both when the session doesn't exist and
-// when it belongs to someone else, so a 404 never leaks which case it was.
-export async function getSessionForUser(db, id, userId) {
+export async function getSessionById(db, id) {
   if (!db) {
     throw new Error("Database not configured");
   }
 
   const row = await db
-    .prepare("SELECT id, user_id, title, created_at, updated_at FROM chat_sessions WHERE id = ? AND user_id = ?")
-    .bind(id, userId)
+    .prepare("SELECT id, user_id, title, created_at, updated_at FROM chat_sessions WHERE id = ?")
+    .bind(id)
     .first();
 
   return mapSessionRow(row);
 }
 
-// Full history, oldest first -- used by GET /v1/sessions/:id. Persisted
-// messages are never dropped; only the context sent to the model is windowed
-// (see listRecentMessages below).
-export async function listMessages(db, sessionId) {
+// Keyset pagination ordered by updated_at desc (ties broken by id desc so the
+// cursor is stable even when two sessions share a timestamp). Fetches one
+// extra row to detect whether there is a next page without a separate COUNT.
+export async function listSessionsForUser(db, userId, { limit, cursor } = {}) {
   if (!db) {
     throw new Error("Database not configured");
   }
 
+  const pageSize = clampLimit(limit);
+  const decoded = decodeCursor(cursor);
+  const cursorClause = decoded ? "AND (cs.updated_at < ? OR (cs.updated_at = ? AND cs.id < ?))" : "";
+
+  const binds = [userId];
+  if (decoded) binds.push(decoded.value, decoded.value, decoded.id);
+  binds.push(pageSize + 1);
+
   const results = await db
-    .prepare("SELECT id, session_id, role, content, created_at FROM chat_messages WHERE session_id = ? ORDER BY created_at ASC")
-    .bind(sessionId)
+    .prepare(
+      `SELECT cs.id, cs.user_id, cs.title, cs.created_at, cs.updated_at, ca.role
+       FROM chat_sessions cs
+       JOIN chat_access ca ON ca.session_id = cs.id
+       WHERE ca.user_id = ? ${cursorClause}
+       ORDER BY cs.updated_at DESC, cs.id DESC
+       LIMIT ?`
+    )
+    .bind(...binds)
     .all();
 
-  return (results.results || []).map(mapMessageRow);
+  const rows = results.results || [];
+  const hasMore = rows.length > pageSize;
+  const page = rows.slice(0, pageSize);
+  const last = page[page.length - 1];
+
+  return {
+    data: page.map(mapSessionRow),
+    next_cursor: hasMore && last ? encodeCursor(last.updated_at, last.id) : null,
+  };
+}
+
+// Keyset pagination ordered by created_at asc (ties broken by id asc), used
+// by GET /v1/sessions/:id/messages. Persisted messages are never dropped;
+// only the context sent to the model is windowed (see listRecentMessages).
+export async function listMessagesPage(db, sessionId, { limit, cursor } = {}) {
+  if (!db) {
+    throw new Error("Database not configured");
+  }
+
+  const pageSize = clampLimit(limit);
+  const decoded = decodeCursor(cursor);
+  const cursorClause = decoded ? "AND (cm.created_at > ? OR (cm.created_at = ? AND cm.id > ?))" : "";
+
+  const binds = [sessionId];
+  if (decoded) binds.push(decoded.value, decoded.value, decoded.id);
+  binds.push(pageSize + 1);
+
+  const results = await db
+    .prepare(
+      `SELECT cm.id, cm.session_id, cm.role, cm.content, cm.created_at
+       FROM chat_messages cm
+       WHERE cm.session_id = ? ${cursorClause}
+       ORDER BY cm.created_at ASC, cm.id ASC
+       LIMIT ?`
+    )
+    .bind(...binds)
+    .all();
+
+  const rows = results.results || [];
+  const hasMore = rows.length > pageSize;
+  const page = rows.slice(0, pageSize);
+  const last = page[page.length - 1];
+
+  return {
+    data: page.map(mapMessageRow),
+    next_cursor: hasMore && last ? encodeCursor(last.created_at, last.id) : null,
+  };
 }
 
 // Context window for AI.run(): last N messages (default 20, i.e. 10
@@ -140,18 +232,160 @@ export async function touchSession(db, id, { title } = {}) {
     .run();
 }
 
-// Cascade to chat_messages is declared at the schema level (ON DELETE
-// CASCADE, migration 0014) -- no manual cleanup needed here.
-export async function deleteSession(db, id, userId) {
+// Explicit rename (PATCH /v1/sessions/:id), distinct from touchSession's
+// auto-fill-if-null behavior: this always overwrites the title, and enforces
+// the more generous 200-char cap (vs the 50-char auto-truncation of the
+// first message) since it's an explicit user choice.
+export async function renameSession(db, id, title) {
   if (!db) {
     throw new Error("Database not configured");
   }
 
-  const existing = await getSessionForUser(db, id, userId);
+  if (typeof title !== "string" || !title.trim()) {
+    throw new ValidationError("title is required and must be a non-empty string");
+  }
+  if (title.length > MANUAL_TITLE_MAX_LENGTH) {
+    throw new ValidationError(`title must be at most ${MANUAL_TITLE_MAX_LENGTH} characters`);
+  }
+
+  await db
+    .prepare("UPDATE chat_sessions SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+    .bind(title, id)
+    .run();
+
+  return getSessionById(db, id);
+}
+
+// Cascade to chat_messages and chat_access is declared at the schema level
+// (ON DELETE CASCADE, migrations 0014 and 0015) -- no manual cleanup needed
+// here. Authorization (must be an owner) is enforced by the caller via
+// requireRole() before this runs; this function only checks existence.
+export async function deleteSession(db, id) {
+  if (!db) {
+    throw new Error("Database not configured");
+  }
+
+  const existing = await getSessionById(db, id);
   if (!existing) {
     return false;
   }
 
-  await db.prepare("DELETE FROM chat_sessions WHERE id = ? AND user_id = ?").bind(id, userId).run();
+  await db.prepare("DELETE FROM chat_sessions WHERE id = ?").bind(id).run();
+  return true;
+}
+
+export async function getChatAccess(db, sessionId, userId) {
+  if (!db) {
+    throw new Error("Database not configured");
+  }
+
+  const row = await db
+    .prepare("SELECT role FROM chat_access WHERE session_id = ? AND user_id = ?")
+    .bind(sessionId, userId)
+    .first();
+
+  return row?.role ?? null;
+}
+
+// Core per-session ACL check (owner/editor/viewer). Unlike graph-db.mjs's
+// requireRole() (which always throws 403 when access is missing or too low),
+// this distinguishes the two cases on purpose: returns null when the actor
+// has no chat_access row at all (caller turns that into a 404, so a session
+// id never leaks to someone with zero access to it -- same reasoning as the
+// original getSessionForUser()), and only throws AuthError(403) when the
+// actor does have a role but it's below minRole (they already know the
+// session exists, so 403 doesn't leak anything new).
+export async function requireRole(db, sessionId, actorSub, minRole) {
+  const role = await getChatAccess(db, sessionId, actorSub);
+  if (!role) {
+    return null;
+  }
+  if (ROLE_RANK[role] < ROLE_RANK[minRole]) {
+    throw new AuthError(403, "Insufficient role for this session");
+  }
+  return role;
+}
+
+export async function listChatAccess(db, sessionId) {
+  if (!db) {
+    throw new Error("Database not configured");
+  }
+
+  const results = await db
+    .prepare("SELECT user_id, role, created_at FROM chat_access WHERE session_id = ? ORDER BY created_at")
+    .bind(sessionId)
+    .all();
+
+  return (results.results || []).map((row) => ({
+    user_id: row.user_id,
+    role: row.role,
+    created_at: row.created_at,
+  }));
+}
+
+async function countOwners(db, sessionId) {
+  const access = await listChatAccess(db, sessionId);
+  return access.filter((a) => a.role === "owner").length;
+}
+
+// Shared invariant: a session can never end up with zero owners. Used by
+// both the PUT downgrade path and both DELETE paths (self-removal and
+// removal by another owner) so the rule is enforced identically everywhere.
+async function assertNotLastOwner(db, sessionId, currentRole, keepsOwnerRole) {
+  if (currentRole !== "owner" || keepsOwnerRole) {
+    return;
+  }
+
+  const owners = await countOwners(db, sessionId);
+  if (owners <= 1) {
+    throw new ConflictError("Session must have at least one owner");
+  }
+}
+
+export async function upsertChatAccess(db, sessionId, userId, role) {
+  if (!db) {
+    throw new Error("Database not configured");
+  }
+
+  if (!VALID_ROLES.includes(role)) {
+    throw new ValidationError(`Invalid role: must be one of ${VALID_ROLES.join(", ")}`);
+  }
+
+  const currentRole = await getChatAccess(db, sessionId, userId);
+
+  await assertNotLastOwner(db, sessionId, currentRole, role === "owner");
+
+  if (currentRole) {
+    await db
+      .prepare("UPDATE chat_access SET role = ? WHERE session_id = ? AND user_id = ?")
+      .bind(role, sessionId, userId)
+      .run();
+  } else {
+    await db
+      .prepare("INSERT INTO chat_access (id, session_id, user_id, role) VALUES (?, ?, ?, ?)")
+      .bind(crypto.randomUUID(), sessionId, userId, role)
+      .run();
+  }
+
+  return { session_id: sessionId, user_id: userId, role };
+}
+
+export async function deleteChatAccess(db, sessionId, userId) {
+  if (!db) {
+    throw new Error("Database not configured");
+  }
+
+  const currentRole = await getChatAccess(db, sessionId, userId);
+  if (!currentRole) {
+    return false;
+  }
+
+  await assertNotLastOwner(db, sessionId, currentRole, false);
+
+  await db
+    .prepare("DELETE FROM chat_access WHERE session_id = ? AND user_id = ?")
+    .bind(sessionId, userId)
+    .run();
+
   return true;
 }
