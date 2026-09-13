@@ -182,6 +182,7 @@ Decisões arquiteturais documentadas em `docs/decisions/`:
 - **0015**: Service Bindings + RPC (`WorkerEntrypoint`) como padrão de comunicação entre Workers
 - **0016**: Grafos por domínio, service accounts e enriquecimento fire-and-forget do grafo via RAG
 - **0017**: GraphRAG Worker — orquestrador dedicado para Q&A híbrido (RAG + Graph)
+- **0018**: GitHub Actions — CI e CD para `dev`
 
 Ler antes de propor mudanças significativas em arquitetura.
 
