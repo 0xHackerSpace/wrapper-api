@@ -1,5 +1,9 @@
+import { AuthError } from "./auth.mjs";
+
 export class ValidationError extends Error {}
 export class ConflictError extends Error {}
+
+export const ROLE_RANK = { viewer: 1, editor: 2, owner: 3 };
 
 function isUniqueConstraintError(error) {
   return typeof error.message === "string" && error.message.includes("UNIQUE constraint failed");
@@ -146,6 +150,18 @@ export async function getGraphAccess(db, graphId, userId) {
   return row?.role ?? null;
 }
 
+// Core per-graph ACL check (owner/editor/viewer), shared by both call paths:
+// - HTTP: requireGraphMembership() in index.mjs derives actorSub from the JWT.
+// - RPC (Service Bindings): callers pass actorSub explicitly, since there is no
+//   JWT on that path. Either way, this is the only place the role/rank lookup lives.
+export async function requireRole(db, graphId, actorSub, minRole) {
+  const role = await getGraphAccess(db, graphId, actorSub);
+  if (!role || ROLE_RANK[role] < ROLE_RANK[minRole]) {
+    throw new AuthError(403, "No access to this graph");
+  }
+  return role;
+}
+
 const VALID_ROLES = ["owner", "editor", "viewer"];
 
 export async function listGraphAccess(db, graphId) {
@@ -247,19 +263,40 @@ export async function getNodeById(db, graphId, id) {
   return mapNodeRow(row);
 }
 
-export async function listNodesByType(db, graphId, type) {
+export async function listNodesByType(db, graphId, type, label) {
   if (!db) {
     throw new Error("Database not configured");
   }
 
+  const labelClause = label ? "AND LOWER(label) = LOWER(?)" : "";
+  const binds = label ? [graphId, type, label] : [graphId, type];
+
   const results = await db
     .prepare(
-      "SELECT id, graph_id, type, label, properties, source_document_id, created_at, updated_at FROM nodes WHERE graph_id = ? AND type = ? ORDER BY created_at"
+      `SELECT id, graph_id, type, label, properties, source_document_id, created_at, updated_at FROM nodes WHERE graph_id = ? AND type = ? ${labelClause} ORDER BY created_at`
     )
-    .bind(graphId, type)
+    .bind(...binds)
     .all();
 
   return (results.results || []).map(mapNodeRow);
+}
+
+// Case-insensitive lookup by (type, label), used for "find-or-create" dedup:
+// both the HTTP `?label=` filter on GET /nodes and the RPC upsertNode()/
+// findNodeByLabel() paths (Fases 2-4 of the GraphRAG roadmap) rely on this.
+export async function findNodeByLabel(db, graphId, type, label) {
+  if (!db) {
+    throw new Error("Database not configured");
+  }
+
+  const row = await db
+    .prepare(
+      "SELECT id, graph_id, type, label, properties, source_document_id, created_at, updated_at FROM nodes WHERE graph_id = ? AND type = ? AND LOWER(label) = LOWER(?) LIMIT 1"
+    )
+    .bind(graphId, type, label)
+    .first();
+
+  return mapNodeRow(row);
 }
 
 export async function createNode(db, graphId, { id, type, label, properties, source_document_id }) {
@@ -303,10 +340,65 @@ export async function createNode(db, graphId, { id, type, label, properties, sou
   return getNodeById(db, graphId, nodeId);
 }
 
-export async function getNeighbors(db, graphId, nodeId) {
+// Updates only label/properties -- type and graph_id are immutable by design
+// (a node cannot change what it represents or move between graphs).
+export async function updateNode(db, graphId, id, { label, properties } = {}) {
   if (!db) {
     throw new Error("Database not configured");
   }
+
+  const existing = await getNodeById(db, graphId, id);
+  if (!existing) {
+    return null;
+  }
+
+  const nextLabel = label !== undefined ? label : existing.label;
+  if (!nextLabel) {
+    throw new ValidationError("Missing required field: label");
+  }
+  const nextProperties = properties !== undefined ? properties : existing.properties;
+
+  await db
+    .prepare("UPDATE nodes SET label = ?, properties = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND graph_id = ?")
+    .bind(nextLabel, serializeProperties(nextProperties), id, graphId)
+    .run();
+
+  return getNodeById(db, graphId, id);
+}
+
+// Edges referencing this node are removed by the ON DELETE CASCADE constraint
+// already declared on edges.from_node_id/to_node_id (migration 0007) -- no
+// manual cleanup needed here.
+export async function deleteNode(db, graphId, id) {
+  if (!db) {
+    throw new Error("Database not configured");
+  }
+
+  const existing = await getNodeById(db, graphId, id);
+  if (!existing) {
+    return false;
+  }
+
+  await db.prepare("DELETE FROM nodes WHERE id = ? AND graph_id = ?").bind(id, graphId).run();
+  return true;
+}
+
+export async function getNeighbors(db, graphId, nodeId, { relation, type } = {}) {
+  if (!db) {
+    throw new Error("Database not configured");
+  }
+
+  const conditions = [];
+  const binds = [nodeId, nodeId, nodeId, graphId];
+  if (relation) {
+    conditions.push("e.relation = ?");
+    binds.push(relation);
+  }
+  if (type) {
+    conditions.push("n.type = ?");
+    binds.push(type);
+  }
+  const extraClause = conditions.length ? `AND ${conditions.join(" AND ")}` : "";
 
   const results = await db
     .prepare(
@@ -316,10 +408,10 @@ export async function getNeighbors(db, graphId, nodeId) {
               n.properties AS neighbor_properties, n.source_document_id AS neighbor_source_document_id
        FROM edges e
        JOIN nodes n ON n.id = (CASE WHEN e.from_node_id = ? THEN e.to_node_id ELSE e.from_node_id END)
-       WHERE (e.from_node_id = ? OR e.to_node_id = ?) AND n.graph_id = ?
+       WHERE (e.from_node_id = ? OR e.to_node_id = ?) AND n.graph_id = ? ${extraClause}
        ORDER BY e.created_at`
     )
-    .bind(nodeId, nodeId, nodeId, graphId)
+    .bind(...binds)
     .all();
 
   return (results.results || []).map((row) => ({
@@ -415,4 +507,131 @@ export async function createEdge(db, graphId, { id, from_node_id, to_node_id, re
     .first();
 
   return mapEdgeRow(created);
+}
+
+const MIN_TRAVERSAL_DEPTH = 1;
+const MAX_TRAVERSAL_DEPTH = 6;
+const DEFAULT_TRAVERSAL_DEPTH = 3;
+const TRAVERSAL_ROW_LIMIT = 200;
+const VALID_DIRECTIONS = ["any", "out", "in"];
+
+function clampMaxDepth(maxDepth) {
+  const parsed = Number(maxDepth);
+  if (!Number.isFinite(parsed)) {
+    return DEFAULT_TRAVERSAL_DEPTH;
+  }
+  return Math.min(MAX_TRAVERSAL_DEPTH, Math.max(MIN_TRAVERSAL_DEPTH, Math.trunc(parsed)));
+}
+
+function normalizeRelationFilter(relation) {
+  if (!relation) return null;
+  const list = relation
+    .split(",")
+    .map((r) => r.trim())
+    .filter(Boolean);
+  return list.length ? list : null;
+}
+
+function normalizeDirection(direction) {
+  if (!direction) return "any";
+  if (!VALID_DIRECTIONS.includes(direction)) {
+    throw new ValidationError(`Invalid direction: must be one of ${VALID_DIRECTIONS.join(", ")}`);
+  }
+  return direction;
+}
+
+function buildDirectionClause(direction) {
+  if (direction === "out") return "(e.from_node_id = t.node_id)";
+  if (direction === "in") return "(e.to_node_id = t.node_id)";
+  return "(e.from_node_id = t.node_id OR e.to_node_id = t.node_id)";
+}
+
+// hop_path accumulates "edgeId:fromId:toId:relation;" segments as the
+// recursive CTE walks the graph, so the full edge trail for a path can be
+// reconstructed here without a second round-trip to the database.
+function parseHopPath(hopPath) {
+  if (!hopPath) return [];
+  return hopPath
+    .split(";")
+    .filter(Boolean)
+    .map((segment) => {
+      const [edge_id, from_node_id, to_node_id, relation] = segment.split(":");
+      return { edge_id, from_node_id, to_node_id, relation };
+    });
+}
+
+// Multi-hop traversal via a SQLite/D1 recursive CTE. Two modes:
+//   - no toId: "reachable" -- every node reachable from fromId within maxDepth,
+//     one row per node (the shortest path found), with distance + edge path.
+//   - toId given: "paths" -- every distinct path from fromId to toId within
+//     maxDepth (there can be more than one).
+// Cycle detection accumulates node_path as a delimited string ('|id1|id2|')
+// and refuses to expand into a node already present in it. maxDepth is
+// clamped to [1,6] and the query carries a hard LIMIT as a CPU safety net for
+// dense graphs, independent of maxDepth.
+export async function findPaths(db, graphId, fromId, { toId, maxDepth, relation, direction } = {}) {
+  if (!db) {
+    throw new Error("Database not configured");
+  }
+
+  const depth = clampMaxDepth(maxDepth);
+  const relations = normalizeRelationFilter(relation);
+  const directionClause = buildDirectionClause(normalizeDirection(direction));
+  const relationClause = relations ? `AND e.relation IN (${relations.map(() => "?").join(", ")})` : "";
+
+  const sql = `
+    WITH RECURSIVE traversal(node_id, depth, node_path, hop_path) AS (
+      SELECT ? AS node_id, 0 AS depth, '|' || ? || '|' AS node_path, '' AS hop_path
+      UNION ALL
+      SELECT
+        CASE WHEN e.from_node_id = t.node_id THEN e.to_node_id ELSE e.from_node_id END,
+        t.depth + 1,
+        t.node_path || (CASE WHEN e.from_node_id = t.node_id THEN e.to_node_id ELSE e.from_node_id END) || '|',
+        t.hop_path || e.id || ':' || e.from_node_id || ':' || e.to_node_id || ':' || e.relation || ';'
+      FROM traversal t
+      JOIN edges e ON ${directionClause}
+      JOIN nodes n2 ON n2.id = (CASE WHEN e.from_node_id = t.node_id THEN e.to_node_id ELSE e.from_node_id END)
+      WHERE t.depth < ?
+        AND n2.graph_id = ?
+        AND instr(t.node_path, '|' || (CASE WHEN e.from_node_id = t.node_id THEN e.to_node_id ELSE e.from_node_id END) || '|') = 0
+        ${relationClause}
+    )
+    SELECT t.node_id, n.type, n.label, n.properties, n.source_document_id, t.depth AS depth, t.node_path, t.hop_path
+    FROM traversal t
+    JOIN nodes n ON n.id = t.node_id
+    WHERE t.depth > 0
+    ORDER BY t.depth
+    LIMIT ${TRAVERSAL_ROW_LIMIT}
+  `;
+
+  const binds = [fromId, fromId, depth, graphId, ...(relations || [])];
+
+  const results = await db.prepare(sql).bind(...binds).all();
+  const rows = results.results || [];
+
+  if (toId) {
+    return rows
+      .filter((row) => row.node_id === toId)
+      .map((row) => ({ depth: row.depth, path: parseHopPath(row.hop_path) }));
+  }
+
+  const seen = new Map();
+  for (const row of rows) {
+    if (!seen.has(row.node_id)) {
+      seen.set(row.node_id, row);
+    }
+  }
+
+  return [...seen.values()].map((row) => ({
+    node: {
+      id: row.node_id,
+      graph_id: graphId,
+      type: row.type,
+      label: row.label,
+      properties: parseProperties(row.properties),
+      source_document_id: row.source_document_id ?? null,
+    },
+    distance: row.depth,
+    path: parseHopPath(row.hop_path),
+  }));
 }

@@ -2,8 +2,65 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import worker from "../terraform/workers/graph/src/index.mjs";
+import GraphWorker from "../terraform/workers/graph/src/index.mjs";
 import { generateToken } from "../terraform/workers/graph/src/lib/jwt.mjs";
+
+// Re-implements, in JS, the semantics of the WITH RECURSIVE traversal query in
+// graph-db.mjs findPaths() -- same cycle detection (via node_path), maxDepth
+// bound, direction/relation filters, and row LIMIT -- since this mock D1 does
+// not execute real SQL. See graph-db.mjs for the actual SQL that ships to D1.
+function runTraversalMock(sql, boundArgs, { nodes, edges }) {
+  const [fromId, , maxDepth, graphId, ...relations] = boundArgs;
+  const hasRelationFilter = relations.length > 0;
+
+  let direction = "any";
+  if (!sql.includes("e.from_node_id = t.node_id OR e.to_node_id = t.node_id")) {
+    direction = sql.includes("(e.from_node_id = t.node_id)") ? "out" : "in";
+  }
+
+  const rows = [];
+  const LIMIT = 200;
+
+  function expand(nodeId, depth, nodePath, hopPath) {
+    if (rows.length >= LIMIT || depth >= maxDepth) return;
+
+    for (const e of edges) {
+      let nextId = null;
+      if (direction !== "in" && e.from_node_id === nodeId) nextId = e.to_node_id;
+      else if (direction !== "out" && e.to_node_id === nodeId) nextId = e.from_node_id;
+      if (!nextId) continue;
+
+      if (hasRelationFilter && !relations.includes(e.relation)) continue;
+
+      const neighbor = nodes.find((n) => n.id === nextId);
+      if (!neighbor || neighbor.graph_id !== graphId) continue;
+
+      if (nodePath.includes(`|${nextId}|`)) continue;
+
+      const nextDepth = depth + 1;
+      const nextNodePath = `${nodePath}${nextId}|`;
+      const nextHopPath = `${hopPath}${e.id}:${e.from_node_id}:${e.to_node_id}:${e.relation};`;
+
+      rows.push({
+        node_id: nextId,
+        type: neighbor.type,
+        label: neighbor.label,
+        properties: neighbor.properties,
+        source_document_id: neighbor.source_document_id,
+        depth: nextDepth,
+        node_path: nextNodePath,
+        hop_path: nextHopPath,
+      });
+
+      if (rows.length >= LIMIT) return;
+      expand(nextId, nextDepth, nextNodePath, nextHopPath);
+    }
+  }
+
+  expand(fromId, 0, `|${fromId}|`, "");
+  rows.sort((a, b) => a.depth - b.depth);
+  return rows.slice(0, LIMIT);
+}
 
 function createGraphDB(seedGraphs = [], seedAccess = [], seedNodes = [], seedEdges = []) {
   const graphs = [...seedGraphs];
@@ -29,6 +86,17 @@ function createGraphDB(seedGraphs = [], seedAccess = [], seedNodes = [], seedEdg
         if (sql.includes("FROM nodes") && sql.includes("WHERE id = ? AND graph_id = ?")) {
           const [id, graphId] = boundArgs;
           return nodes.find((n) => n.id === id && n.graph_id === graphId) || null;
+        }
+        if (sql.includes("FROM nodes") && sql.includes("LOWER(label) = LOWER(?)") && sql.includes("LIMIT 1")) {
+          const [graphId, type, label] = boundArgs;
+          return (
+            nodes.find(
+              (n) =>
+                n.graph_id === graphId &&
+                n.type === type &&
+                String(n.label).toLowerCase() === String(label).toLowerCase()
+            ) || null
+          );
         }
         if (sql.includes("FROM edges") && sql.includes("WHERE id = ?")) {
           return edges.find((e) => e.id === boundArgs[0]) || null;
@@ -56,13 +124,19 @@ function createGraphDB(seedGraphs = [], seedAccess = [], seedNodes = [], seedEdg
           return { results };
         }
         if (sql.includes("FROM edges e") && sql.includes("JOIN nodes n")) {
-          const [nodeId, , , graphId] = boundArgs;
+          const [nodeId, , , graphId, ...extra] = boundArgs;
+          let extraIdx = 0;
+          const relationFilter = sql.includes("e.relation = ?") ? extra[extraIdx++] : null;
+          const typeFilter = sql.includes("n.type = ?") ? extra[extraIdx++] : null;
+
           const matched = edges.filter((e) => e.from_node_id === nodeId || e.to_node_id === nodeId);
           const results = matched
             .map((e) => {
               const neighborId = e.from_node_id === nodeId ? e.to_node_id : e.from_node_id;
               const neighbor = nodes.find((n) => n.id === neighborId);
               if (!neighbor || neighbor.graph_id !== graphId) return null;
+              if (relationFilter && e.relation !== relationFilter) return null;
+              if (typeFilter && neighbor.type !== typeFilter) return null;
               return {
                 edge_id: e.id,
                 relation: e.relation,
@@ -94,11 +168,16 @@ function createGraphDB(seedGraphs = [], seedAccess = [], seedNodes = [], seedEdg
           return { results };
         }
         if (sql.includes("FROM nodes") && sql.includes("WHERE graph_id = ? AND type = ?")) {
-          const [graphId, type] = boundArgs;
-          const results = nodes
-            .filter((n) => n.graph_id === graphId && n.type === type)
-            .sort((x, y) => (x.created_at || "").localeCompare(y.created_at || ""));
+          const [graphId, type, label] = boundArgs;
+          let results = nodes.filter((n) => n.graph_id === graphId && n.type === type);
+          if (sql.includes("LOWER(label) = LOWER(?)")) {
+            results = results.filter((n) => String(n.label).toLowerCase() === String(label).toLowerCase());
+          }
+          results = results.sort((x, y) => (x.created_at || "").localeCompare(y.created_at || ""));
           return { results };
+        }
+        if (sql.includes("WITH RECURSIVE traversal")) {
+          return { results: runTraversalMock(sql, boundArgs, { nodes, edges }) };
         }
         return { results: [] };
       },
@@ -137,6 +216,30 @@ function createGraphDB(seedGraphs = [], seedAccess = [], seedNodes = [], seedEdg
           nodes.push({ id, graph_id, type, label, properties, source_document_id, created_at: now, updated_at: now });
           return { success: true };
         }
+        if (sql.startsWith("UPDATE nodes")) {
+          const [label, properties, id, graph_id] = boundArgs;
+          const row = nodes.find((n) => n.id === id && n.graph_id === graph_id);
+          if (row) {
+            row.label = label;
+            row.properties = properties;
+            row.updated_at = new Date().toISOString();
+          }
+          return { success: true };
+        }
+        if (sql.startsWith("DELETE FROM nodes")) {
+          const [id, graph_id] = boundArgs;
+          const index = nodes.findIndex((n) => n.id === id && n.graph_id === graph_id);
+          if (index !== -1) {
+            nodes.splice(index, 1);
+            // Simulates the ON DELETE CASCADE constraint on edges (migration 0007).
+            for (let i = edges.length - 1; i >= 0; i--) {
+              if (edges[i].from_node_id === id || edges[i].to_node_id === id) {
+                edges.splice(i, 1);
+              }
+            }
+          }
+          return { success: true };
+        }
         if (sql.startsWith("INSERT INTO edges")) {
           const [id, from_node_id, to_node_id, relation, properties] = boundArgs;
           if (
@@ -173,8 +276,10 @@ function harness(overrides = {}) {
     GRAPH_DB: db,
   };
 
+  const worker = new GraphWorker({}, env);
+
   const call = async (path, init) => {
-    const response = await worker.fetch(new Request(`https://graph.test${path}`, init), env, {});
+    const response = await worker.fetch(new Request(`https://graph.test${path}`, init));
     const text = await response.text();
     return { status: response.status, body: text ? JSON.parse(text) : null };
   };
@@ -185,7 +290,7 @@ function harness(overrides = {}) {
     call(path, { method: "PUT", body: JSON.stringify(body), headers: { "content-type": "application/json", ...headers } });
   const del = (path, headers = {}) => call(path, { method: "DELETE", headers });
 
-  return { env, db, call, get, post, put, del };
+  return { env, db, worker, call, get, post, put, del };
 }
 
 async function authHeader(payload = { sub: "user-1", username: "ianoliv", permissions: ["graph:read", "graph:write"] }) {
@@ -693,4 +798,261 @@ test("unknown routes return 404", async () => {
 
   assert.equal(status, 404);
   assert.equal(body.error.message, "Endpoint not found");
+});
+
+test("GET /v1/graphs/:graphId/nodes?type=&label= filters case-insensitively on label", async () => {
+  const db = createGraphDB();
+  seedGraph(db, { id: "g1", owners: ["user-1"] });
+  db._nodes.push(
+    { id: "n1", graph_id: "g1", type: "ingredient", label: "Garlic", properties: null, source_document_id: null, created_at: "t1" },
+    { id: "n2", graph_id: "g1", type: "ingredient", label: "Ginger", properties: null, source_document_id: null, created_at: "t2" }
+  );
+  const { get } = harness({ GRAPH_DB: db });
+  const headers = await authHeader();
+
+  const { status, body } = await get("/v1/graphs/g1/nodes?type=ingredient&label=garlic", headers);
+
+  assert.equal(status, 200);
+  assert.equal(body.count, 1);
+  assert.equal(body.data[0].id, "n1");
+});
+
+test("GET /v1/graphs/:graphId/nodes/:id/neighbors filters by relation and type", async () => {
+  const db = createGraphDB();
+  seedGraph(db, { id: "g1", owners: ["user-1"] });
+  db._nodes.push(
+    { id: "n1", graph_id: "g1", type: "concept", label: "A", properties: null, source_document_id: null, created_at: "t1" },
+    { id: "n2", graph_id: "g1", type: "concept", label: "B", properties: null, source_document_id: null, created_at: "t2" },
+    { id: "n3", graph_id: "g1", type: "person", label: "C", properties: null, source_document_id: null, created_at: "t3" }
+  );
+  db._edges.push(
+    { id: "e1", from_node_id: "n1", to_node_id: "n2", relation: "related_to", properties: null, created_at: "t1" },
+    { id: "e2", from_node_id: "n1", to_node_id: "n3", relation: "authored_by", properties: null, created_at: "t2" }
+  );
+  const { get } = harness({ GRAPH_DB: db });
+  const headers = await authHeader();
+
+  const byRelation = await get("/v1/graphs/g1/nodes/n1/neighbors?relation=authored_by", headers);
+  assert.equal(byRelation.status, 200);
+  assert.equal(byRelation.body.count, 1);
+  assert.equal(byRelation.body.data[0].neighbor.id, "n3");
+
+  const byType = await get("/v1/graphs/g1/nodes/n1/neighbors?type=concept", headers);
+  assert.equal(byType.status, 200);
+  assert.equal(byType.body.count, 1);
+  assert.equal(byType.body.data[0].neighbor.id, "n2");
+});
+
+test("PUT /v1/graphs/:graphId/nodes/:id updates label/properties: 200, 403 without editor role, 404 when missing", async () => {
+  const db = createGraphDB();
+  seedGraph(db, { id: "g1", owners: ["user-1"], viewers: ["user-2"] });
+  db._nodes.push({ id: "n1", graph_id: "g1", type: "concept", label: "A", properties: null, source_document_id: null, created_at: "t1" });
+  const { put } = harness({ GRAPH_DB: db });
+  const headers = await authHeader();
+
+  const ok = await put("/v1/graphs/g1/nodes/n1", { label: "A2", properties: { x: 1 } }, headers);
+  assert.equal(ok.status, 200);
+  assert.equal(ok.body.data.label, "A2");
+  assert.deepEqual(ok.body.data.properties, { x: 1 });
+
+  const viewerHeaders = await authHeader({ sub: "user-2", permissions: ["graph:read", "graph:write"] });
+  const forbidden = await put("/v1/graphs/g1/nodes/n1", { label: "A3" }, viewerHeaders);
+  assert.equal(forbidden.status, 403);
+
+  const missing = await put("/v1/graphs/g1/nodes/missing", { label: "X" }, headers);
+  assert.equal(missing.status, 404);
+});
+
+test("DELETE /v1/graphs/:graphId/nodes/:id removes the node and its edges: 200, 403 without editor role, 404 when missing", async () => {
+  const db = createGraphDB();
+  seedGraph(db, { id: "g1", owners: ["user-1"], viewers: ["user-2"] });
+  db._nodes.push(
+    { id: "n1", graph_id: "g1", type: "concept", label: "A", properties: null, source_document_id: null, created_at: "t1" },
+    { id: "n2", graph_id: "g1", type: "concept", label: "B", properties: null, source_document_id: null, created_at: "t2" }
+  );
+  db._edges.push({ id: "e1", from_node_id: "n1", to_node_id: "n2", relation: "related_to", properties: null, created_at: "t1" });
+  const { del } = harness({ GRAPH_DB: db });
+
+  const viewerHeaders = await authHeader({ sub: "user-2", permissions: ["graph:read", "graph:write"] });
+  const forbidden = await del("/v1/graphs/g1/nodes/n1", viewerHeaders);
+  assert.equal(forbidden.status, 403);
+
+  const headers = await authHeader();
+  const ok = await del("/v1/graphs/g1/nodes/n1", headers);
+  assert.equal(ok.status, 200);
+  assert.equal(db._nodes.some((n) => n.id === "n1"), false);
+  assert.equal(db._edges.length, 0, "edges referencing the deleted node must be cascaded away");
+
+  const missing = await del("/v1/graphs/g1/nodes/n1", headers);
+  assert.equal(missing.status, 404);
+});
+
+test("GET /v1/graphs/:graphId/nodes/:id/paths (reachable mode) returns nodes within maxDepth without looping on a cycle", async () => {
+  const db = createGraphDB();
+  seedGraph(db, { id: "g1", owners: ["user-1"] });
+  db._nodes.push(
+    { id: "a", graph_id: "g1", type: "concept", label: "A", properties: null, source_document_id: null, created_at: "t1" },
+    { id: "b", graph_id: "g1", type: "concept", label: "B", properties: null, source_document_id: null, created_at: "t2" }
+  );
+  db._edges.push(
+    { id: "e1", from_node_id: "a", to_node_id: "b", relation: "related_to", properties: null, created_at: "t1" },
+    { id: "e2", from_node_id: "b", to_node_id: "a", relation: "related_to", properties: null, created_at: "t2" }
+  );
+  const { get } = harness({ GRAPH_DB: db });
+  const headers = await authHeader();
+
+  const { status, body } = await get("/v1/graphs/g1/nodes/a/paths?maxDepth=4", headers);
+
+  assert.equal(status, 200);
+  assert.equal(body.mode, "reachable");
+  assert.equal(body.count, 1, "the A-B-A cycle must not be reported as a reachable node beyond B");
+  assert.equal(body.data[0].node.id, "b");
+  assert.equal(body.data[0].distance, 1);
+});
+
+test("GET /v1/graphs/:graphId/nodes/:id/paths respects maxDepth", async () => {
+  const db = createGraphDB();
+  seedGraph(db, { id: "g1", owners: ["user-1"] });
+  db._nodes.push(
+    { id: "a", graph_id: "g1", type: "concept", label: "A", properties: null, source_document_id: null, created_at: "t1" },
+    { id: "b", graph_id: "g1", type: "concept", label: "B", properties: null, source_document_id: null, created_at: "t2" },
+    { id: "c", graph_id: "g1", type: "concept", label: "C", properties: null, source_document_id: null, created_at: "t3" }
+  );
+  db._edges.push(
+    { id: "e1", from_node_id: "a", to_node_id: "b", relation: "related_to", properties: null, created_at: "t1" },
+    { id: "e2", from_node_id: "b", to_node_id: "c", relation: "related_to", properties: null, created_at: "t2" }
+  );
+  const { get } = harness({ GRAPH_DB: db });
+  const headers = await authHeader();
+
+  const depthOne = await get("/v1/graphs/g1/nodes/a/paths?maxDepth=1", headers);
+  assert.equal(depthOne.status, 200);
+  assert.equal(depthOne.body.count, 1);
+  assert.equal(depthOne.body.data[0].node.id, "b");
+
+  const depthTwo = await get("/v1/graphs/g1/nodes/a/paths?maxDepth=2", headers);
+  assert.equal(depthTwo.status, 200);
+  assert.equal(depthTwo.body.count, 2);
+  const ids = depthTwo.body.data.map((row) => row.node.id).sort();
+  assert.deepEqual(ids, ["b", "c"]);
+});
+
+test("GET /v1/graphs/:graphId/nodes/:id/paths filters by relation", async () => {
+  const db = createGraphDB();
+  seedGraph(db, { id: "g1", owners: ["user-1"] });
+  db._nodes.push(
+    { id: "a", graph_id: "g1", type: "concept", label: "A", properties: null, source_document_id: null, created_at: "t1" },
+    { id: "b", graph_id: "g1", type: "concept", label: "B", properties: null, source_document_id: null, created_at: "t2" },
+    { id: "c", graph_id: "g1", type: "concept", label: "C", properties: null, source_document_id: null, created_at: "t3" }
+  );
+  db._edges.push(
+    { id: "e1", from_node_id: "a", to_node_id: "b", relation: "pairs_well_with", properties: null, created_at: "t1" },
+    { id: "e2", from_node_id: "a", to_node_id: "c", relation: "substitutes_for", properties: null, created_at: "t2" }
+  );
+  const { get } = harness({ GRAPH_DB: db });
+  const headers = await authHeader();
+
+  const { status, body } = await get("/v1/graphs/g1/nodes/a/paths?relation=pairs_well_with", headers);
+
+  assert.equal(status, 200);
+  assert.equal(body.count, 1);
+  assert.equal(body.data[0].node.id, "b");
+});
+
+test("GET /v1/graphs/:graphId/nodes/:id/paths?to= (paths mode) returns the edge trail to a specific node", async () => {
+  const db = createGraphDB();
+  seedGraph(db, { id: "g1", owners: ["user-1"] });
+  db._nodes.push(
+    { id: "a", graph_id: "g1", type: "concept", label: "A", properties: null, source_document_id: null, created_at: "t1" },
+    { id: "b", graph_id: "g1", type: "concept", label: "B", properties: null, source_document_id: null, created_at: "t2" },
+    { id: "c", graph_id: "g1", type: "concept", label: "C", properties: null, source_document_id: null, created_at: "t3" }
+  );
+  db._edges.push(
+    { id: "e1", from_node_id: "a", to_node_id: "b", relation: "related_to", properties: null, created_at: "t1" },
+    { id: "e2", from_node_id: "b", to_node_id: "c", relation: "related_to", properties: null, created_at: "t2" }
+  );
+  const { get } = harness({ GRAPH_DB: db });
+  const headers = await authHeader();
+
+  const { status, body } = await get("/v1/graphs/g1/nodes/a/paths?to=c&maxDepth=3", headers);
+
+  assert.equal(status, 200);
+  assert.equal(body.mode, "paths");
+  assert.equal(body.count, 1);
+  assert.equal(body.data[0].depth, 2);
+  assert.deepEqual(
+    body.data[0].path.map((hop) => hop.edge_id),
+    ["e1", "e2"]
+  );
+
+  const missingTo = await get("/v1/graphs/g1/nodes/a/paths?to=missing", headers);
+  assert.equal(missingTo.status, 404);
+});
+
+test("GET /v1/graphs/:graphId/nodes/:id/paths returns 403 without viewer access and 404 for a missing node", async () => {
+  const db = createGraphDB();
+  seedGraph(db, { id: "g1", owners: ["user-2"] });
+  db._nodes.push({ id: "a", graph_id: "g1", type: "concept", label: "A", properties: null, source_document_id: null, created_at: "t1" });
+  const { get } = harness({ GRAPH_DB: db });
+  const headers = await authHeader({ sub: "user-1", permissions: ["graph:read", "graph:write"] });
+
+  const forbidden = await get("/v1/graphs/g1/nodes/a/paths", headers);
+  assert.equal(forbidden.status, 403);
+
+  const ownerHeaders = await authHeader({ sub: "user-2", permissions: ["graph:read"] });
+  const missingNode = await get("/v1/graphs/g1/nodes/missing/paths", ownerHeaders);
+  assert.equal(missingNode.status, 404);
+});
+
+test("RPC upsertNode() enforces the editor role and dedups by (type, label)", async () => {
+  const db = createGraphDB();
+  seedGraph(db, { id: "g1", owners: ["user-1"], viewers: ["user-2"] });
+  const { worker, db: graphDb } = harness({ GRAPH_DB: db });
+
+  await assert.rejects(
+    () => worker.upsertNode("g1", "user-2", { type: "ingredient", label: "Garlic" }),
+    /No access to this graph/
+  );
+
+  const created = await worker.upsertNode("g1", "user-1", { type: "ingredient", label: "Garlic" });
+  assert.equal(created.label, "Garlic");
+  assert.equal(graphDb._nodes.length, 1);
+
+  const deduped = await worker.upsertNode("g1", "user-1", { type: "ingredient", label: "garlic" });
+  assert.equal(deduped.id, created.id, "a case-insensitive (type, label) match should be reused instead of duplicated");
+  assert.equal(graphDb._nodes.length, 1);
+});
+
+test("RPC methods enforce the per-graph ACL using the actorSub argument, not a JWT", async () => {
+  const db = createGraphDB();
+  seedGraph(db, { id: "g1", owners: ["user-1"], viewers: ["user-2"] });
+  db._nodes.push(
+    { id: "n1", graph_id: "g1", type: "concept", label: "A", properties: null, source_document_id: null, created_at: "t1" },
+    { id: "n2", graph_id: "g1", type: "concept", label: "B", properties: null, source_document_id: null, created_at: "t2" }
+  );
+  db._edges.push({ id: "e1", from_node_id: "n1", to_node_id: "n2", relation: "related_to", properties: null, created_at: "t1" });
+  const { worker } = harness({ GRAPH_DB: db });
+
+  // viewer can read but not write
+  const neighbors = await worker.getNeighbors("g1", "user-2", "n1");
+  assert.equal(neighbors.length, 1);
+
+  await assert.rejects(() => worker.updateNode("g1", "user-2", "n1", { label: "A2" }), /No access to this graph/);
+  await assert.rejects(() => worker.deleteNode("g1", "user-2", "n1"), /No access to this graph/);
+  await assert.rejects(
+    () => worker.createEdge("g1", "user-2", { from_node_id: "n1", to_node_id: "n2", relation: "x" }),
+    /No access to this graph/
+  );
+
+  // owner can write
+  const updated = await worker.updateNode("g1", "user-1", "n1", { label: "A2" });
+  assert.equal(updated.label, "A2");
+
+  const found = await worker.findNodeByLabel("g1", "user-2", "concept", "a2");
+  assert.equal(found.id, "n1");
+
+  const paths = await worker.findPaths("g1", "user-2", "n1", { maxDepth: 2 });
+  assert.ok(Array.isArray(paths));
+
+  await assert.rejects(() => worker.deleteNode("g1", "user-1", "missing"), /Node not found/);
 });

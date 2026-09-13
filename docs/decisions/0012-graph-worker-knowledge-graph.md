@@ -77,11 +77,14 @@ Nenhuma mudança em `main.tf`/`locals.tf`/módulos — o worker `graph` usa exat
 - [ ] Aplicar a migration `0007_create_graph_nodes_and_edges.sql` manualmente após `terraform apply` criar o D1 `dev-graph`
 - [ ] Rodar `terraform apply` para provisionar `dev-graph` e o worker `graph` (pendente de confirmação explícita)
 - [ ] Avaliar se leituras (`GET /v1/nodes*`) devem ficar públicas, caso o `rag-worker` (ou outro worker) precise consultar o grafo sem token de usuário
-- [ ] Considerar endpoint de travessia multi-hop (ex: caminho entre dois nodes) se o caso de uso exigir
+- [x] Endpoint de travessia multi-hop: `GET /v1/graphs/:graphId/nodes/:id/paths` (recursive CTE, `maxDepth` 1–6, detecção de ciclo) — Fase 1 do roadmap GraphRAG
+- [x] `PUT`/`DELETE /v1/graphs/:graphId/nodes/:id` (CRUD de node que faltava) — Fase 1 do roadmap GraphRAG
+- [x] Conversão para `WorkerEntrypoint` + métodos RPC via Service Binding (`upsertNode`, `updateNode`, `deleteNode`, `createEdge`, `getNeighbors`, `findPaths`, `findNodeByLabel`), ver [ADR 0015](0015-service-bindings-rpc-worker-communication.md)
 
 ## Referências
 
 - [[0004-d1-multiple-databases|ADR 0004: Múltiplos D1s por domínio]]
 - [[0008-openai-compatible-ai-api|ADR 0008: AI Worker com OpenAI Compatibility]]
 - [[0011-unit-testing-strategy-for-workers|ADR 0011: Estratégia de Testes Unitários para Workers]]
+- [[0015-service-bindings-rpc-worker-communication|ADR 0015: Service Bindings + RPC como comunicação interna entre Workers]]
 - `CLAUDE.md` — seção "Architecture"
