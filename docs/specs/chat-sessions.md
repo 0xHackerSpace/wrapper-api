@@ -8,7 +8,7 @@ Hoje `POST /v1/chat/completions` (`ai-worker`) é totalmente stateless: o client
 
 ## Fora de escopo
 
-Ver [spec de fora-de-escopo](chat-sessions-out-of-scope.md) para a lista completa e a justificativa de cada item adiado (streaming, compartilhamento de sessão, RPC entre workers, renomear sessão manualmente, paginação/busca no histórico).
+Ver [spec de fora-de-escopo](chat-sessions-out-of-scope.md) para a lista original de itens adiados. **Atualização**: compartilhamento, paginação e renomear manualmente foram implementados depois — ver [chat-sessions-sharing-and-pagination.md](chat-sessions-sharing-and-pagination.md), que também substitui as decisões de dono único, "sem paginação" e "título só auto-gerado" descritas abaixo. Só streaming e RPC entre workers continuam fora de escopo.
 
 ## Arquitetura
 

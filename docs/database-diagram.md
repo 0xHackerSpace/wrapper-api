@@ -152,15 +152,16 @@ Notas:
 
 ## dev-chat
 
-Sessões de chat do `ai-worker`, isoladas do fluxo stateless de `/v1/chat/completions` ([ADR 0019](decisions/0019-ai-worker-chat-sessions.md)). Migration: 0014.
+Sessões de chat do `ai-worker`, isoladas do fluxo stateless de `/v1/chat/completions` ([ADR 0019](decisions/0019-ai-worker-chat-sessions.md)), com ACL por sessão a partir da [ADR 0020](decisions/0020-chat-session-sharing-and-pagination.md). Migrations: 0014, 0015.
 
 ```mermaid
 erDiagram
     chat_sessions ||--o{ chat_messages : "contém"
+    chat_sessions ||--o{ chat_access : "controla acesso via"
 
     chat_sessions {
         text id PK
-        text user_id "logico, dev-auth.users.id"
+        text user_id "logico, dev-auth.users.id, metadado historico"
         text title
         datetime created_at
         datetime updated_at
@@ -173,13 +174,21 @@ erDiagram
         text content
         datetime created_at
     }
+
+    chat_access {
+        text id PK
+        text session_id FK
+        text user_id "logico, dev-auth.users.id"
+        text role "owner | editor | viewer"
+        datetime created_at
+    }
 ```
 
 Notas:
-- `chat_messages.session_id` é `ON DELETE CASCADE` a partir de `chat_sessions` (D1 aplica `PRAGMA foreign_keys`, diferente do SQLite padrão).
-- `chat_sessions.user_id` não tem FK física para `dev-auth.users` (D1s são isolados); toda operação valida `user_id == sub` do JWT no código do worker, nunca no schema.
-- Sem tabela de ACL — sessão é sempre privada ao dono, sem modelo de colaboradores como `graph_access`.
-- Índices em `chat_sessions.user_id` e `chat_messages.session_id`.
+- `chat_messages.session_id` e `chat_access.session_id` são `ON DELETE CASCADE` a partir de `chat_sessions` (D1 aplica `PRAGMA foreign_keys`, diferente do SQLite padrão).
+- `chat_sessions.user_id` não tem FK física para `dev-auth.users` (D1s são isolados) e, desde a migration 0015, deixou de ser a fonte de autorização — é só metadado histórico de quem criou a sessão. Toda checagem de acesso passa por `chat_access`.
+- `chat_access` é a ACL por sessão (`UNIQUE(session_id, user_id)`), mesmo modelo de `graph_access` ([ADR 0012](decisions/0012-graph-worker-knowledge-graph.md)): papéis `owner`/`editor`/`viewer`, com a invariante de que toda sessão deve manter ao menos um `owner` (aplicada em `chat-db.mjs`, não pelo schema — ver [ADR 0020](decisions/0020-chat-session-sharing-and-pagination.md)). A migration 0015 faz backfill de uma linha `owner` para cada sessão já existente antes dela.
+- Índices em `chat_sessions.user_id`, `chat_messages.session_id` e `chat_access.user_id`.
 
 ## Relações lógicas entre bancos (sem FK física)
 
@@ -189,6 +198,7 @@ erDiagram
     users ||--o{ graphs : "created_by (logico)"
     ingredients ||--o| nodes : "properties.ingredientId (logico)"
     users ||--o{ chat_sessions : "user_id (logico)"
+    users ||--o{ chat_access : "user_id (logico)"
 ```
 
 `rag-worker` (Vectorize, fora do D1) e `graphrag-worker` (orquestrador sem estado próprio) não possuem tabelas — não aparecem nos diagramas acima. `dev-chat` é exclusivo do `ai-worker` — nenhum outro worker acessa essas tabelas, diretamente ou via RPC.
