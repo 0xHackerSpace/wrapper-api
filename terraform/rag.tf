@@ -4,6 +4,20 @@ locals {
   }
 }
 
+locals {
+  rag_script_names = {
+    for key, s in var.rag_stacks : key => coalesce(s.name, "${var.environment}-${key}")
+  }
+  rag_service_bindings = {
+    for key, s in var.rag_stacks : key => [for sb in s.service_bindings : merge(
+      { name = sb.name, type = "service" },
+      sb.target_worker != null ? { service = local.worker_script_names[sb.target_worker] } : {},
+      sb.target_rag != null ? { service = local.rag_script_names[sb.target_rag] } : {},
+      sb.entrypoint != null ? { entrypoint = sb.entrypoint } : {}
+    )]
+  }
+}
+
 module "rag" {
   source   = "./modules/rag"
   for_each = var.rag_stacks
@@ -28,5 +42,5 @@ module "rag" {
   chunk_overlap        = each.value.chunk_overlap
   top_k                = each.value.top_k
   metadata_indexes     = each.value.metadata_indexes
-  additional_bindings  = each.value.additional_bindings
+  additional_bindings  = concat(each.value.additional_bindings, local.rag_service_bindings[each.key])
 }

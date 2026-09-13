@@ -105,6 +105,12 @@ variable "workers" {
       resource_key = optional(string)
     })), [])
     additional_bindings = optional(list(map(string)), [])
+    service_bindings = optional(list(object({
+      name          = string
+      target_worker = optional(string) # key in var.workers
+      target_rag    = optional(string) # key in var.rag_stacks
+      entrypoint    = optional(string) # WorkerEntrypoint class name, if not the default export
+    })), [])
   }))
   default  = {}
   nullable = false
@@ -132,6 +138,12 @@ variable "rag_stacks" {
     top_k                = optional(number)
     metadata_indexes     = optional(map(string), { documentId = "string", source = "string" })
     additional_bindings  = optional(list(map(string)), [])
+    service_bindings = optional(list(object({
+      name          = string
+      target_worker = optional(string) # key in var.workers
+      target_rag    = optional(string) # key in var.rag_stacks
+      entrypoint    = optional(string) # WorkerEntrypoint class name, if not the default export
+    })), [])
   }))
   default  = {}
   nullable = false
