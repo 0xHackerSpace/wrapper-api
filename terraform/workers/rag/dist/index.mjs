@@ -1,3 +1,6 @@
+// terraform/workers/rag/index.mjs
+import { WorkerEntrypoint } from "cloudflare:workers";
+
 // terraform/workers/rag/lib/jwt.mjs
 var encoder = new TextEncoder();
 var decoder = new TextDecoder();
@@ -41,6 +44,103 @@ function base64urlDecode(str) {
   );
 }
 
+// terraform/workers/rag/lib/entity-extraction.mjs
+var EXTRACTION_PROMPT = [
+  'Extract entities and relations as strict JSON: {"entities":[{"type":"...","label":"..."}],',
+  '"relations":[{"from":"<label>","to":"<label>","relation":"..."}]}.',
+  "Only use labels from your own entities list. No prose, JSON only."
+].join(" ");
+function emptyResult() {
+  return { entities: [], relations: [] };
+}
+function isValidEntity(entity) {
+  return entity !== null && typeof entity === "object" && typeof entity.type === "string" && entity.type.trim().length > 0 && typeof entity.label === "string" && entity.label.trim().length > 0;
+}
+function isValidRelation(relation) {
+  return relation !== null && typeof relation === "object" && typeof relation.from === "string" && relation.from.trim().length > 0 && typeof relation.to === "string" && relation.to.trim().length > 0 && typeof relation.relation === "string" && relation.relation.trim().length > 0;
+}
+function extractContent(chatResult) {
+  return chatResult?.choices?.[0]?.message?.content;
+}
+function parseEntitiesJson(chatResult) {
+  const raw = extractContent(chatResult);
+  if (typeof raw !== "string" || raw.trim().length === 0) {
+    return emptyResult();
+  }
+  try {
+    const jsonBlock = raw.match(/\{[\s\S]*\}/);
+    const parsed = JSON.parse(jsonBlock ? jsonBlock[0] : raw);
+    if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.entities) || !Array.isArray(parsed.relations)) {
+      console.error("entity extraction: unexpected JSON shape from AI_WORKER.chat()", parsed);
+      return emptyResult();
+    }
+    return {
+      entities: parsed.entities.filter(isValidEntity),
+      relations: parsed.relations.filter(isValidRelation)
+    };
+  } catch (error) {
+    console.error("entity extraction: failed to parse AI_WORKER.chat() output as JSON", error);
+    return emptyResult();
+  }
+}
+async function extractEntities(aiWorkerBinding, text) {
+  if (!aiWorkerBinding) {
+    console.error("entity extraction: AI_WORKER binding not configured");
+    return emptyResult();
+  }
+  try {
+    const result = await aiWorkerBinding.chat(
+      [
+        { role: "system", content: EXTRACTION_PROMPT },
+        { role: "user", content: text }
+      ],
+      { temperature: 0 }
+    );
+    return parseEntitiesJson(result);
+  } catch (error) {
+    console.error("entity extraction: AI_WORKER.chat() call failed", error);
+    return emptyResult();
+  }
+}
+
+// terraform/workers/rag/lib/graph-sync.mjs
+function isConflictError(error) {
+  return typeof error?.message === "string" && /already exists/i.test(error.message);
+}
+async function syncEntitiesToGraph(graphWorkerBinding, graphId, documentId2, { entities, relations }) {
+  if (!graphWorkerBinding) {
+    console.error("graph sync: GRAPH_WORKER binding not configured");
+    return;
+  }
+  const nodeIds = {};
+  for (const entity of entities) {
+    const node = await graphWorkerBinding.upsertNode(graphId, "svc-rag-enrichment", {
+      type: entity.type,
+      label: entity.label,
+      source_document_id: documentId2
+    });
+    nodeIds[entity.label] = node.id;
+  }
+  for (const relation of relations) {
+    const fromId = nodeIds[relation.from];
+    const toId = nodeIds[relation.to];
+    if (!fromId || !toId) {
+      continue;
+    }
+    try {
+      await graphWorkerBinding.createEdge(graphId, "svc-rag-enrichment", {
+        from_node_id: fromId,
+        to_node_id: toId,
+        relation: relation.relation
+      });
+    } catch (error) {
+      if (!isConflictError(error)) {
+        throw error;
+      }
+    }
+  }
+}
+
 // terraform/workers/rag/index.mjs
 var SERVICE = "rag";
 var METADATA_TEXT_LIMIT = 2048;
@@ -48,10 +148,12 @@ var EMBEDDING_BATCH = 50;
 var MAX_DOCUMENT_LENGTH = 512 * 1024;
 var MAX_QUESTION_LENGTH = 2e3;
 var MAX_METADATA_ENTRIES = 16;
+var ENTITY_EXTRACTION_TEXT_LIMIT = 8e3;
 var DEFAULTS = {
   chunkSize: 1200,
   chunkOverlap: 150,
-  topK: 5
+  topK: 5,
+  graphId: "rag-documents"
 };
 var SYSTEM_PROMPT = [
   "You answer questions using only the provided context.",
@@ -132,6 +234,15 @@ function documentId(value) {
   }
   if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value)) {
     throw new HttpError(400, "id must match [A-Za-z0-9][A-Za-z0-9._-]{0,127}");
+  }
+  return value;
+}
+function graphIdentifier(value) {
+  if (value === void 0 || value === null) {
+    return DEFAULTS.graphId;
+  }
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new HttpError(400, "field 'graphId' must be a non-empty string");
   }
   return value;
 }
@@ -217,7 +328,24 @@ function health(env, config) {
     timestamp: (/* @__PURE__ */ new Date()).toISOString()
   });
 }
-async function ingest(request, env, config) {
+function scheduleGraphEnrichment(ctx, env, graphId, docId, text) {
+  if (!env.AI_WORKER || !env.GRAPH_WORKER) {
+    console.warn("rag: skipping graph enrichment, AI_WORKER/GRAPH_WORKER binding not configured");
+    return;
+  }
+  if (!ctx || typeof ctx.waitUntil !== "function") {
+    return;
+  }
+  ctx.waitUntil(
+    (async () => {
+      const extracted = await extractEntities(env.AI_WORKER, text.slice(0, ENTITY_EXTRACTION_TEXT_LIMIT));
+      if (extracted.entities.length > 0) {
+        await syncEntitiesToGraph(env.GRAPH_WORKER, graphId, docId, extracted);
+      }
+    })().catch((error) => console.error("rag: graph enrichment failed", error))
+  );
+}
+async function ingest(request, env, config, ctx) {
   const body = await readJson(request);
   const text = typeof body.text === "string" ? body.text.trim() : "";
   if (text.length === 0) {
@@ -232,6 +360,7 @@ async function ingest(request, env, config) {
   const id = documentId(body.id);
   const source = body.source ?? id;
   const metadata = extraMetadata(body.metadata);
+  const graphId = graphIdentifier(body.graphId);
   const pieces = chunk(text, config.chunkSize, config.chunkOverlap);
   if (pieces.length === 0) {
     throw new HttpError(400, "field 'text' produced no chunks");
@@ -259,6 +388,7 @@ async function ingest(request, env, config) {
     documentId: id,
     source,
     metadata,
+    graphId,
     sourceKey,
     chunkCount: vectors.length,
     chunkSize: config.chunkSize,
@@ -271,6 +401,7 @@ async function ingest(request, env, config) {
     httpMetadata: { contentType: "application/json; charset=utf-8" },
     customMetadata: { documentId: id }
   });
+  scheduleGraphEnrichment(ctx, env, graphId, id, text);
   return json(
     {
       documentId: id,
@@ -282,24 +413,23 @@ async function ingest(request, env, config) {
     { status: 201 }
   );
 }
-async function query(request, env, config) {
-  const body = await readJson(request);
-  const question = typeof body.question === "string" ? body.question.trim() : "";
-  if (question.length === 0) {
+async function runQuery(env, config, question, { topK: topKOverride, filter } = {}) {
+  const trimmedQuestion = typeof question === "string" ? question.trim() : "";
+  if (trimmedQuestion.length === 0) {
     throw new HttpError(400, "field 'question' is required and must be a non-empty string");
   }
-  if (question.length > MAX_QUESTION_LENGTH) {
+  if (trimmedQuestion.length > MAX_QUESTION_LENGTH) {
     throw new HttpError(413, `field 'question' must be at most ${MAX_QUESTION_LENGTH} characters`);
   }
-  if (body.filter !== void 0 && (typeof body.filter !== "object" || body.filter === null || Array.isArray(body.filter))) {
+  if (filter !== void 0 && (typeof filter !== "object" || filter === null || Array.isArray(filter))) {
     throw new HttpError(400, "field 'filter' must be a JSON object");
   }
-  const topK = clamp(integer(body.topK, config.topK), 1, 50);
-  const [vector] = await embed(env, [question]);
+  const topK = clamp(integer(topKOverride, config.topK), 1, 50);
+  const [vector] = await embed(env, [trimmedQuestion]);
   const search = await env.VECTORIZE.query(vector, {
     topK,
     returnMetadata: "all",
-    ...body.filter === void 0 ? {} : { filter: body.filter }
+    ...filter === void 0 ? {} : { filter }
   });
   const matches = Array.isArray(search?.matches) ? search.matches : [];
   const sources = matches.map((match) => ({
@@ -314,11 +444,11 @@ async function query(request, env, config) {
     return typeof text === "string" ? `[${index + 1}] ${text}` : null;
   }).filter((entry) => entry !== null);
   if (context.length === 0) {
-    return json({
-      question,
+    return {
+      question: trimmedQuestion,
       answer: "There is no indexed context available to answer this question.",
       sources
-    });
+    };
   }
   const completion = await env.AI.run(env.GENERATION_MODEL, {
     messages: [
@@ -326,19 +456,25 @@ async function query(request, env, config) {
       { role: "user", content: `Context:
 ${context.join("\n\n")}
 
-Question: ${question}` }
+Question: ${trimmedQuestion}` }
     ]
   });
   const answer = typeof completion === "string" ? completion : completion?.response ?? "";
-  return json({ question, answer, sources });
+  return { question: trimmedQuestion, answer, sources };
+}
+async function query(request, env, config) {
+  const body = await readJson(request);
+  const result = await runQuery(env, config, body.question, { topK: body.topK, filter: body.filter });
+  return json(result);
 }
 var ROUTES = {
   "/health": { method: "GET", handler: (request, env, config) => health(env, config), authenticated: false },
   "/ingest": { method: "POST", handler: ingest, authenticated: true, permission: "rag:ingest" },
   "/query": { method: "POST", handler: query, authenticated: true, permission: "rag:query" }
 };
-var index_default = {
-  async fetch(request, env, ctx) {
+var index_default = class extends WorkerEntrypoint {
+  async fetch(request) {
+    const env = this.env;
     const { pathname } = new URL(request.url);
     const route = ROUTES[pathname.replace(/\/+$/, "") || "/health"];
     if (route === void 0) {
@@ -352,7 +488,7 @@ var index_default = {
       if (route.authenticated) {
         await authorize(request, env, route.permission);
       }
-      return await route.handler(request, env, configuration(env));
+      return await route.handler(request, env, configuration(env), this.ctx);
     } catch (error) {
       if (error instanceof HttpError) {
         return json({ error: error.message }, { status: error.status });
@@ -360,6 +496,14 @@ var index_default = {
       console.error(error);
       return json({ error: "internal error" }, { status: 500 });
     }
+  }
+  // RPC entrypoint for other workers via Service Bindings (graphrag-worker, Fase 4 of
+  // the GraphRAG roadmap). No requirePermission/JWT here: Service Bindings are only
+  // reachable from within the same Cloudflare account -- same convention as
+  // ai-worker's chat() and graph-worker's RPC surface.
+  async query(question, opts = {}) {
+    requireBindings(this.env);
+    return runQuery(this.env, configuration(this.env), question, opts);
   }
 };
 export {
