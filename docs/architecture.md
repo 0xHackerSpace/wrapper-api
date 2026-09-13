@@ -52,7 +52,7 @@ Conforme [ADR 0004](decisions/0004-d1-multiple-databases.md), usamos múltiplos 
 - **dev-auth**: Usuários, logs, profiles, permissões (5 migrations)
 - **dev-ingredient**: Ingredientes (1 migration)
 - **dev-graph**: Nodes e edges do grafo de conhecimento (1 migration)
-- **dev-chat**: Sessões e mensagens de chat, exclusivo do `ai-worker` (1 migration, ver [ADR 0019](decisions/0019-ai-worker-chat-sessions.md))
+- **dev-chat**: Sessões, mensagens e ACL de acesso de chat, exclusivo do `ai-worker` (2 migrations, ver [ADR 0019](decisions/0019-ai-worker-chat-sessions.md) e [ADR 0020](decisions/0020-chat-session-sharing-and-pagination.md))
 
 Cada Worker recebe bindings D1 específicos no `tfvars`; migrations rodam via `wrangler d1 execute --remote`.
 
@@ -106,17 +106,22 @@ Permite integração fácil com SDKs OpenAI e ferramentas existentes sem depend�
 
 ### Sessões de chat
 
-Conforme [ADR 0019](decisions/0019-ai-worker-chat-sessions.md), o `ai-worker` também mantém sessões de chat persistidas em D1 dedicado (`dev-chat`, binding `CHAT_DB`), separado do fluxo stateless de `/v1/chat/completions`:
+Conforme [ADR 0019](decisions/0019-ai-worker-chat-sessions.md) e [ADR 0020](decisions/0020-chat-session-sharing-and-pagination.md), o `ai-worker` também mantém sessões de chat persistidas em D1 dedicado (`dev-chat`, binding `CHAT_DB`), separado do fluxo stateless de `/v1/chat/completions`:
 
 ```
-POST   /v1/sessions                 - Cria sessão vazia (title: null)
-GET    /v1/sessions                 - Lista sessões do usuário autenticado, ordenadas por updated_at desc
-GET    /v1/sessions/:id             - Sessão + histórico completo de mensagens
-POST   /v1/sessions/:id/messages    - Envia mensagem, persiste turno completo (user + assistant)
-DELETE /v1/sessions/:id             - Remove sessão e mensagens (cascade)
+POST   /v1/sessions                       - Cria sessão vazia (title: null), criador vira owner
+GET    /v1/sessions?limit=&cursor=        - Lista sessões que o usuário tem chat_access, paginado, ordenadas por updated_at desc
+GET    /v1/sessions/:id                   - Metadados da sessão + role do chamador (sem messages inline)
+PATCH  /v1/sessions/:id                   - Renomeia a sessão (body { title }, requer editor/owner)
+POST   /v1/sessions/:id/messages          - Envia mensagem, persiste turno completo (user + assistant), requer editor/owner
+GET    /v1/sessions/:id/messages?limit=&cursor= - Histórico paginado, ordenado por created_at asc, requer viewer+
+DELETE /v1/sessions/:id                   - Remove sessão e mensagens (cascade), requer owner
+PUT    /v1/sessions/:id/access/:userId    - Concede/atualiza o papel de um colaborador (upsert, requer owner)
+DELETE /v1/sessions/:id/access/:userId    - Revoga acesso de alguém (requer owner) ou sai da própria sessão (self)
+GET    /v1/sessions/:id/access            - Lista colaboradores da sessão (requer viewer+)
 ```
 
-Todas exigem JWT Bearer com a permission `ai:chat` (a mesma de `/v1/chat/completions`, nenhuma nova permission foi criada) e derivam o dono da sessão do `sub` do JWT; sessão de outro usuário ou inexistente retorna `404` em ambos os casos (não vaza existência). Histórico completo é sempre persistido, mas só as últimas 20 mensagens da sessão são enviadas como contexto para `AI.run()` em cada nova mensagem.
+Todas exigem JWT Bearer com a permission `ai:chat` (a mesma de `/v1/chat/completions`, nenhuma nova permission foi criada — o papel dentro da sessão já controla o resto). Acesso a cada sessão é controlado por `chat_access` (papéis `owner`/`editor`/`viewer`, mesmo modelo de `graph_access`, [ADR 0012](decisions/0012-graph-worker-knowledge-graph.md)): `owner` lê, escreve, renomeia, gerencia colaboradores e apaga a sessão; `editor` lê, escreve e renomeia; `viewer` só lê. Toda sessão sempre tem ao menos um `owner` (invariante aplicada em `PUT`/`DELETE .../access`). Ator sem nenhuma linha em `chat_access` recebe `404` (não vaza existência da sessão); ator com papel insuficiente recebe `403`. Histórico completo é sempre persistido, mas só as últimas 20 mensagens da sessão são enviadas como contexto para `AI.run()` em cada nova mensagem. `GET /v1/sessions` e `GET /v1/sessions/:id/messages` usam paginação keyset com cursor opaco em base64 (`limit` default 20, máx 100).
 
 ## RAG Worker (retrieval-augmented generation)
 

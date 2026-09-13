@@ -184,6 +184,7 @@ Decisões arquiteturais documentadas em `docs/decisions/`:
 - **0017**: GraphRAG Worker — orquestrador dedicado para Q&A híbrido (RAG + Graph)
 - **0018**: GitHub Actions — CI e CD para `dev`
 - **0019**: Sessões de Chat no `ai-worker` (D1 `dev-chat`, endpoints `/v1/sessions/*`)
+- **0020**: Compartilhamento, paginação e renomear de sessões de chat (`chat_access` ACL, keyset pagination)
 
 Ler antes de propor mudanças significativas em arquitetura.
 
