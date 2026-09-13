@@ -198,6 +198,68 @@ async function deleteIngredient(db, id) {
   return existing;
 }
 
+// terraform/workers/api/src/lib/graph-sync.mjs
+var GRAPH_ID = "ingredients";
+var GRAPH_ACTOR_SUB = "svc-api-ingredients";
+var NODE_TYPE = "ingredient";
+function toNodeProperties(ingredient) {
+  return { ingredientId: ingredient.id };
+}
+function syncIngredientCreated(env, ctx, ingredient) {
+  if (!env.GRAPH_WORKER || !ctx) return;
+  ctx.waitUntil(
+    env.GRAPH_WORKER.upsertNode(GRAPH_ID, GRAPH_ACTOR_SUB, {
+      type: NODE_TYPE,
+      label: ingredient.nome,
+      properties: toNodeProperties(ingredient)
+    }).catch((err) => console.error("graph sync (create) failed", err))
+  );
+}
+function syncIngredientUpdated(env, ctx, before, after) {
+  if (!env.GRAPH_WORKER || !ctx || !before) return;
+  ctx.waitUntil(
+    (async () => {
+      const node = await env.GRAPH_WORKER.findNodeByLabel(GRAPH_ID, GRAPH_ACTOR_SUB, NODE_TYPE, before.nome);
+      if (!node) {
+        await env.GRAPH_WORKER.upsertNode(GRAPH_ID, GRAPH_ACTOR_SUB, {
+          type: NODE_TYPE,
+          label: after.nome,
+          properties: toNodeProperties(after)
+        });
+        return;
+      }
+      await env.GRAPH_WORKER.updateNode(GRAPH_ID, GRAPH_ACTOR_SUB, node.id, {
+        label: after.nome,
+        properties: toNodeProperties(after)
+      });
+    })().catch((err) => console.error("graph sync (update) failed", err))
+  );
+}
+function syncIngredientDeleted(env, ctx, ingredient) {
+  if (!env.GRAPH_WORKER || !ctx) return;
+  ctx.waitUntil(
+    (async () => {
+      const node = await env.GRAPH_WORKER.findNodeByLabel(GRAPH_ID, GRAPH_ACTOR_SUB, NODE_TYPE, ingredient.nome);
+      if (!node) return;
+      await env.GRAPH_WORKER.deleteNode(GRAPH_ID, GRAPH_ACTOR_SUB, node.id);
+    })().catch((err) => console.error("graph sync (delete) failed", err))
+  );
+}
+async function resolveIngredientNode(env, ingredient) {
+  return env.GRAPH_WORKER.findNodeByLabel(GRAPH_ID, GRAPH_ACTOR_SUB, NODE_TYPE, ingredient.nome);
+}
+async function enrichGraphNode(env, node) {
+  const ingredientId = node?.properties?.ingredientId;
+  if (!ingredientId) {
+    return { nodeId: node.id, label: node.label };
+  }
+  const ingredient = await getIngredientById(env.INGREDIENTS_DB, ingredientId);
+  if (!ingredient) {
+    return { nodeId: node.id, label: node.label };
+  }
+  return { nodeId: node.id, label: node.label, ingredient };
+}
+
 // terraform/workers/api/src/index.mjs
 var index_default = {
   async fetch(request, env, ctx) {
@@ -208,14 +270,18 @@ var index_default = {
       if (pathname === "/") return handleInfo(env);
       if (pathname === "/protected" && request.method === "GET") return await handleProtected(request, env);
       if (pathname === "/profile" && request.method === "GET") return await handleProfile(request, env);
+      const recommendationsMatch = pathname.match(/^\/ingredients\/([^/]+)\/recommendations$/);
+      if (recommendationsMatch && request.method === "GET") {
+        return await handleGetIngredientRecommendations(request, env, recommendationsMatch[1], url);
+      }
       const ingredientsMatch = pathname.match(/^\/ingredients(?:\/([^/]+))?$/);
       if (ingredientsMatch) {
         const ingredientId = ingredientsMatch[1];
         if (pathname === "/ingredients" && request.method === "GET") return await handleGetAllIngredients(request, env);
-        if (pathname === "/ingredients" && request.method === "POST") return await handleCreateIngredient(request, env);
+        if (pathname === "/ingredients" && request.method === "POST") return await handleCreateIngredient(request, env, ctx);
         if (ingredientId && pathname === `/ingredients/${ingredientId}` && request.method === "GET") return await handleGetIngredient(request, env, ingredientId);
-        if (ingredientId && pathname === `/ingredients/${ingredientId}` && request.method === "PUT") return await handleUpdateIngredient(request, env, ingredientId);
-        if (ingredientId && pathname === `/ingredients/${ingredientId}` && request.method === "DELETE") return await handleDeleteIngredient(request, env, ingredientId);
+        if (ingredientId && pathname === `/ingredients/${ingredientId}` && request.method === "PUT") return await handleUpdateIngredient(request, env, ctx, ingredientId);
+        if (ingredientId && pathname === `/ingredients/${ingredientId}` && request.method === "DELETE") return await handleDeleteIngredient(request, env, ctx, ingredientId);
       }
       return json({ error: "Not Found" }, 404);
     } catch (error) {
@@ -244,7 +310,8 @@ function handleInfo(env) {
       health: "GET /health",
       info: "GET /",
       protected: "GET /protected (requires auth)",
-      profile: "GET /profile (requires auth)"
+      profile: "GET /profile (requires auth)",
+      recommendations: "GET /ingredients/:id/recommendations?relation=&indirect=&maxDepth= (requires auth, ingredient:read)"
     },
     authentication: {
       type: "JWT Bearer Token",
@@ -317,7 +384,7 @@ async function handleGetIngredient(request, env, ingredientId) {
     return json({ error: error.message }, 500);
   }
 }
-async function handleCreateIngredient(request, env) {
+async function handleCreateIngredient(request, env, ctx) {
   await requirePermission(request, env, "ingredient:create");
   if (!env.INGREDIENTS_DB) {
     return json({ error: "Ingredients database not configured" }, 500);
@@ -338,6 +405,7 @@ async function handleCreateIngredient(request, env) {
       url: url || null,
       permissions: permissions || null
     });
+    syncIngredientCreated(env, ctx, ingredient);
     return json({
       success: true,
       data: ingredient
@@ -350,7 +418,7 @@ async function handleCreateIngredient(request, env) {
     return json({ error: error.message }, 500);
   }
 }
-async function handleUpdateIngredient(request, env, ingredientId) {
+async function handleUpdateIngredient(request, env, ctx, ingredientId) {
   await requirePermission(request, env, "ingredient:update");
   if (!env.INGREDIENTS_DB) {
     return json({ error: "Ingredients database not configured" }, 500);
@@ -358,6 +426,7 @@ async function handleUpdateIngredient(request, env, ingredientId) {
   try {
     const body = await request.json();
     const { nome, slug, type, reference, url, permissions } = body;
+    const before = await getIngredientById(env.INGREDIENTS_DB, ingredientId);
     const ingredient = await updateIngredient(env.INGREDIENTS_DB, ingredientId, {
       nome,
       slug,
@@ -366,6 +435,7 @@ async function handleUpdateIngredient(request, env, ingredientId) {
       url,
       permissions
     });
+    syncIngredientUpdated(env, ctx, before, ingredient);
     return json({
       success: true,
       data: ingredient
@@ -381,13 +451,14 @@ async function handleUpdateIngredient(request, env, ingredientId) {
     return json({ error: error.message }, 500);
   }
 }
-async function handleDeleteIngredient(request, env, ingredientId) {
+async function handleDeleteIngredient(request, env, ctx, ingredientId) {
   await requirePermission(request, env, "ingredient:delete");
   if (!env.INGREDIENTS_DB) {
     return json({ error: "Ingredients database not configured" }, 500);
   }
   try {
     const ingredient = await deleteIngredient(env.INGREDIENTS_DB, ingredientId);
+    syncIngredientDeleted(env, ctx, ingredient);
     return json({
       success: true,
       data: ingredient,
@@ -398,6 +469,51 @@ async function handleDeleteIngredient(request, env, ingredientId) {
     if (error.message.includes("not found")) {
       return json({ error: error.message }, 404);
     }
+    return json({ error: error.message }, 500);
+  }
+}
+async function handleGetIngredientRecommendations(request, env, ingredientId, url) {
+  await requirePermission(request, env, "ingredient:read");
+  if (!env.INGREDIENTS_DB) {
+    return json({ error: "Ingredients database not configured" }, 500);
+  }
+  if (!env.GRAPH_WORKER) {
+    return json({ error: "Graph recommendations are not available: GRAPH_WORKER binding not configured" }, 501);
+  }
+  try {
+    const ingredient = await getIngredientById(env.INGREDIENTS_DB, ingredientId);
+    if (!ingredient) {
+      return json({ error: "Ingredient not found" }, 404);
+    }
+    const relation = url.searchParams.get("relation") || void 0;
+    const indirect = url.searchParams.get("indirect") === "true";
+    const maxDepth = Number(url.searchParams.get("maxDepth")) || 2;
+    const node = await resolveIngredientNode(env, ingredient);
+    if (!node) {
+      return json({ success: true, data: [], count: 0 });
+    }
+    if (indirect) {
+      const reachable = await env.GRAPH_WORKER.findPaths(GRAPH_ID, GRAPH_ACTOR_SUB, node.id, { relation, maxDepth });
+      const data2 = await Promise.all(
+        reachable.map(async (entry) => ({
+          ...await enrichGraphNode(env, entry.node),
+          relation: entry.path[entry.path.length - 1]?.relation ?? null,
+          distance: entry.distance
+        }))
+      );
+      return json({ success: true, mode: "indirect", data: data2, count: data2.length });
+    }
+    const neighbors = await env.GRAPH_WORKER.getNeighbors(GRAPH_ID, GRAPH_ACTOR_SUB, node.id, { relation });
+    const data = await Promise.all(
+      neighbors.map(async (entry) => ({
+        ...await enrichGraphNode(env, entry.neighbor),
+        relation: entry.relation,
+        direction: entry.direction
+      }))
+    );
+    return json({ success: true, mode: "direct", data, count: data.length });
+  } catch (error) {
+    console.error("Get ingredient recommendations error:", error);
     return json({ error: error.message }, 500);
   }
 }
