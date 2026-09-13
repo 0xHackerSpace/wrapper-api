@@ -7,17 +7,20 @@ import { generateToken } from "../terraform/workers/ai/src/lib/jwt.mjs";
 
 const JWT_SECRET = "test-secret";
 
-// In-memory mock of CHAT_DB (dev-chat: chat_sessions + chat_messages), same
-// approach as tests/graph-worker.test.mjs's createGraphDB(): interprets
-// prepare(sql).bind(...).first()/.all()/.run() via substring matching on the
-// query text rather than executing real SQL.
-function createChatDB(seedSessions = [], seedMessages = []) {
+// In-memory mock of CHAT_DB (dev-chat: chat_sessions + chat_access +
+// chat_messages), same approach as tests/graph-worker.test.mjs's
+// createGraphDB(): interprets prepare(sql).bind(...).first()/.all()/.run()
+// via substring matching on the query text rather than executing real SQL.
+// chat_access mirrors graph_access (see graph-worker.test.mjs's createGraphDB
+// + seedGraph) adapted to sessions instead of graphs.
+function createChatDB(seedSessions = [], seedAccess = [], seedMessages = []) {
   const sessions = [...seedSessions];
+  const access = [...seedAccess];
   const messages = [...seedMessages];
 
   // Monotonic fake clock so created_at/updated_at strictly increase across
   // inserts/updates, even when several happen within the same millisecond --
-  // needed to deterministically test ordering (e.g. GET /v1/sessions).
+  // needed to deterministically test ordering/pagination.
   let clock = 0;
   function nextTimestamp() {
     clock += 1;
@@ -32,30 +35,75 @@ function createChatDB(seedSessions = [], seedMessages = []) {
         return this;
       },
       async first() {
-        if (sql.includes("FROM chat_sessions") && sql.includes("WHERE id = ? AND user_id = ?")) {
-          const [id, userId] = boundArgs;
-          return sessions.find((s) => s.id === id && s.user_id === userId) || null;
+        if (sql.includes("FROM chat_sessions") && sql.includes("WHERE id = ?")) {
+          const [id] = boundArgs;
+          return sessions.find((s) => s.id === id) || null;
         }
         if (sql.includes("FROM chat_messages") && sql.includes("WHERE id = ?")) {
           const [id] = boundArgs;
           return messages.find((m) => m.id === id) || null;
         }
+        if (sql.includes("FROM chat_access") && sql.includes("WHERE session_id = ? AND user_id = ?")) {
+          const [sessionId, userId] = boundArgs;
+          return access.find((a) => a.session_id === sessionId && a.user_id === userId) || null;
+        }
         return null;
       },
       async all() {
-        if (sql.includes("FROM chat_sessions") && sql.includes("WHERE user_id = ?") && sql.includes("ORDER BY updated_at DESC")) {
-          const [userId] = boundArgs;
-          const results = sessions
-            .filter((s) => s.user_id === userId)
-            .sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""));
-          return { results };
+        if (sql.includes("FROM chat_sessions cs") && sql.includes("JOIN chat_access ca")) {
+          const hasCursor = sql.includes("cs.updated_at <");
+          const userId = boundArgs[0];
+          let cursorValue = null;
+          let cursorId = null;
+          let limit;
+          if (hasCursor) {
+            [, cursorValue, , cursorId, limit] = boundArgs;
+          } else {
+            [, limit] = boundArgs;
+          }
+
+          let results = sessions
+            .filter((s) => access.some((a) => a.session_id === s.id && a.user_id === userId))
+            .map((s) => ({ ...s, role: access.find((a) => a.session_id === s.id && a.user_id === userId).role }))
+            .sort((a, b) => {
+              const byUpdated = (b.updated_at || "").localeCompare(a.updated_at || "");
+              return byUpdated !== 0 ? byUpdated : (b.id || "").localeCompare(a.id || "");
+            });
+
+          if (hasCursor) {
+            results = results.filter(
+              (s) => s.updated_at < cursorValue || (s.updated_at === cursorValue && s.id < cursorId)
+            );
+          }
+
+          return { results: results.slice(0, limit) };
         }
-        if (sql.includes("FROM chat_messages") && sql.includes("ORDER BY created_at ASC")) {
-          const [sessionId] = boundArgs;
-          const results = messages
+        if (sql.includes("FROM chat_messages cm") && sql.includes("WHERE cm.session_id = ?")) {
+          const hasCursor = sql.includes("cm.created_at >");
+          const sessionId = boundArgs[0];
+          let cursorValue = null;
+          let cursorId = null;
+          let limit;
+          if (hasCursor) {
+            [, cursorValue, , cursorId, limit] = boundArgs;
+          } else {
+            [, limit] = boundArgs;
+          }
+
+          let results = messages
             .filter((m) => m.session_id === sessionId)
-            .sort((a, b) => (a.created_at || "").localeCompare(b.created_at || ""));
-          return { results };
+            .sort((a, b) => {
+              const byCreated = (a.created_at || "").localeCompare(b.created_at || "");
+              return byCreated !== 0 ? byCreated : (a.id || "").localeCompare(b.id || "");
+            });
+
+          if (hasCursor) {
+            results = results.filter(
+              (m) => m.created_at > cursorValue || (m.created_at === cursorValue && m.id > cursorId)
+            );
+          }
+
+          return { results: results.slice(0, limit) };
         }
         if (sql.includes("FROM chat_messages") && sql.includes("ORDER BY created_at DESC LIMIT ?")) {
           const [sessionId, limit] = boundArgs;
@@ -63,6 +111,13 @@ function createChatDB(seedSessions = [], seedMessages = []) {
             .filter((m) => m.session_id === sessionId)
             .sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""))
             .slice(0, limit);
+          return { results };
+        }
+        if (sql.includes("FROM chat_access") && sql.includes("WHERE session_id = ?") && sql.includes("ORDER BY created_at")) {
+          const [sessionId] = boundArgs;
+          const results = access
+            .filter((a) => a.session_id === sessionId)
+            .sort((x, y) => (x.created_at || "").localeCompare(y.created_at || ""));
           return { results };
         }
         return { results: [] };
@@ -74,31 +129,61 @@ function createChatDB(seedSessions = [], seedMessages = []) {
           sessions.push({ id, user_id: userId, title: null, created_at: now, updated_at: now });
           return { success: true };
         }
+        if (sql.startsWith("INSERT INTO chat_access")) {
+          const [id, sessionId, userId, role] = boundArgs;
+          access.push({ id, session_id: sessionId, user_id: userId, role, created_at: nextTimestamp() });
+          return { success: true };
+        }
+        if (sql.startsWith("UPDATE chat_access")) {
+          const [role, sessionId, userId] = boundArgs;
+          const row = access.find((a) => a.session_id === sessionId && a.user_id === userId);
+          if (row) row.role = role;
+          return { success: true };
+        }
+        if (sql.startsWith("DELETE FROM chat_access")) {
+          const [sessionId, userId] = boundArgs;
+          const index = access.findIndex((a) => a.session_id === sessionId && a.user_id === userId);
+          if (index !== -1) access.splice(index, 1);
+          return { success: true };
+        }
         if (sql.startsWith("INSERT INTO chat_messages")) {
           const [id, sessionId, role, content] = boundArgs;
           messages.push({ id, session_id: sessionId, role, content, created_at: nextTimestamp() });
           return { success: true };
         }
-        if (sql.startsWith("UPDATE chat_sessions")) {
+        // touchSession: UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP, title = COALESCE(title, ?) WHERE id = ?
+        if (sql.includes("COALESCE")) {
           const [title, id] = boundArgs;
           const row = sessions.find((s) => s.id === id);
           if (row) {
             row.updated_at = nextTimestamp();
-            if (row.title === null || row.title === undefined) {
-              row.title = title;
-            }
+            if (row.title === null || row.title === undefined) row.title = title;
+          }
+          return { success: true };
+        }
+        // renameSession: UPDATE chat_sessions SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?
+        if (sql.startsWith("UPDATE chat_sessions") && sql.includes("title = ?")) {
+          const [title, id] = boundArgs;
+          const row = sessions.find((s) => s.id === id);
+          if (row) {
+            row.title = title;
+            row.updated_at = nextTimestamp();
           }
           return { success: true };
         }
         if (sql.startsWith("DELETE FROM chat_sessions")) {
-          const [id, userId] = boundArgs;
-          const index = sessions.findIndex((s) => s.id === id && s.user_id === userId);
+          const [id] = boundArgs;
+          const index = sessions.findIndex((s) => s.id === id);
           if (index !== -1) {
             sessions.splice(index, 1);
-            // Simulates the ON DELETE CASCADE constraint on chat_messages
-            // (migration 0014) -- no manual cleanup needed in chat-db.mjs.
+            // Simulates the ON DELETE CASCADE constraints on chat_messages
+            // (migration 0014) and chat_access (migration 0015) -- no manual
+            // cleanup needed in chat-db.mjs.
             for (let i = messages.length - 1; i >= 0; i--) {
               if (messages[i].session_id === id) messages.splice(i, 1);
+            }
+            for (let i = access.length - 1; i >= 0; i--) {
+              if (access[i].session_id === id) access.splice(i, 1);
             }
           }
           return { success: true };
@@ -111,8 +196,28 @@ function createChatDB(seedSessions = [], seedMessages = []) {
   return {
     prepare: (sql) => makeStatement(sql),
     _sessions: sessions,
+    _access: access,
     _messages: messages,
+    _nextTimestamp: nextTimestamp,
   };
+}
+
+// Seeds a session plus its chat_access rows directly in the mock D1,
+// mirroring tests/graph-worker.test.mjs's seedGraph() helper.
+function seedSession(db, { id = "s1", userId = "user-1", title = null, owners, editors = [], viewers = [] } = {}) {
+  const ownerIds = owners || [userId];
+  const createdAt = db._nextTimestamp();
+  db._sessions.push({ id, user_id: userId, title, created_at: createdAt, updated_at: createdAt });
+  for (const uid of ownerIds) {
+    db._access.push({ id: `acc-${id}-${uid}`, session_id: id, user_id: uid, role: "owner", created_at: db._nextTimestamp() });
+  }
+  for (const uid of editors) {
+    db._access.push({ id: `acc-${id}-${uid}`, session_id: id, user_id: uid, role: "editor", created_at: db._nextTimestamp() });
+  }
+  for (const uid of viewers) {
+    db._access.push({ id: `acc-${id}-${uid}`, session_id: id, user_id: uid, role: "viewer", created_at: db._nextTimestamp() });
+  }
+  return id;
 }
 
 function harness(overrides = {}) {
@@ -139,9 +244,13 @@ function harness(overrides = {}) {
   const get = (path, headers = {}) => call(path, { method: "GET", headers });
   const post = (path, body, headers = {}) =>
     call(path, { method: "POST", body: JSON.stringify(body), headers: { "content-type": "application/json", ...headers } });
+  const put = (path, body, headers = {}) =>
+    call(path, { method: "PUT", body: JSON.stringify(body), headers: { "content-type": "application/json", ...headers } });
+  const patch = (path, body, headers = {}) =>
+    call(path, { method: "PATCH", body: JSON.stringify(body), headers: { "content-type": "application/json", ...headers } });
   const del = (path, headers = {}) => call(path, { method: "DELETE", headers });
 
-  return { env, worker, runCalls, chatDb, call, get, post, del };
+  return { env, worker, runCalls, chatDb, call, get, post, put, patch, del };
 }
 
 async function authHeader(payload = { sub: "user-1", permissions: ["ai:chat"] }) {
@@ -165,6 +274,8 @@ test("GET / and GET /v1 describe available endpoints", async () => {
   assert.equal(root.status, 200);
   assert.equal(root.body.service, "ai");
   assert.ok(root.body.endpoints.chat_completions);
+  assert.ok(root.body.endpoints.list_messages);
+  assert.ok(root.body.endpoints.grant_access);
 
   const v1 = await get("/v1");
   assert.equal(v1.status, 200);
@@ -304,10 +415,10 @@ test("unknown endpoints return 404", async () => {
   assert.equal(status, 404);
 });
 
-// --- Chat sessions (docs/specs/chat-sessions.md) ---
+// --- Chat sessions (docs/specs/chat-sessions.md, chat-sessions-sharing-and-pagination.md) ---
 
-test("POST /v1/sessions creates an empty session with a null title", async () => {
-  const { post } = harness();
+test("POST /v1/sessions creates an empty session with a null title, and the creator becomes owner", async () => {
+  const { post, chatDb } = harness();
   const headers = await authHeader();
 
   const { status, body } = await post("/v1/sessions", {}, headers);
@@ -316,6 +427,9 @@ test("POST /v1/sessions creates an empty session with a null title", async () =>
   assert.ok(body.id);
   assert.equal(body.title, null);
   assert.ok(body.created_at);
+
+  const access = chatDb._access.find((a) => a.session_id === body.id && a.user_id === "user-1");
+  assert.equal(access.role, "owner");
 });
 
 test("session routes require a valid JWT with the ai:chat permission", async () => {
@@ -329,30 +443,39 @@ test("session routes require a valid JWT with the ai:chat permission", async () 
   assert.equal(forbidden.status, 403);
 });
 
-test("POST /v1/sessions/:id/messages on another user's session returns 404, not 403", async () => {
-  const { post } = harness();
+test("a user with no chat_access row at all gets 404 on every /v1/sessions/:id* route", async () => {
+  const { post, get, patch, del } = harness();
   const ownerHeaders = await authHeader({ sub: "user-1", permissions: ["ai:chat"] });
-  const otherHeaders = await authHeader({ sub: "user-2", permissions: ["ai:chat"] });
+  const strangerHeaders = await authHeader({ sub: "user-2", permissions: ["ai:chat"] });
 
   const created = await post("/v1/sessions", {}, ownerHeaders);
   const sessionId = created.body.id;
 
-  const { status, body } = await post(`/v1/sessions/${sessionId}/messages`, { content: "hi" }, otherHeaders);
+  assert.equal((await get(`/v1/sessions/${sessionId}`, strangerHeaders)).status, 404);
+  assert.equal((await del(`/v1/sessions/${sessionId}`, strangerHeaders)).status, 404);
+  assert.equal((await patch(`/v1/sessions/${sessionId}`, { title: "x" }, strangerHeaders)).status, 404);
 
-  assert.equal(status, 404);
-  assert.match(body.error.message, /not found/i);
+  const message = await post(`/v1/sessions/${sessionId}/messages`, { content: "hi" }, strangerHeaders);
+  assert.equal(message.status, 404);
+  assert.match(message.body.error.message, /not found/i);
+
+  assert.equal((await get(`/v1/sessions/${sessionId}/messages`, strangerHeaders)).status, 404);
 });
 
-test("GET and DELETE /v1/sessions/:id also 404 for a session belonging to another user", async () => {
-  const { get, del, post } = harness();
-  const ownerHeaders = await authHeader({ sub: "user-1", permissions: ["ai:chat"] });
-  const otherHeaders = await authHeader({ sub: "user-2", permissions: ["ai:chat"] });
+test("GET /v1/sessions/:id returns metadata and role, without an inline messages array", async () => {
+  const { post, get } = harness();
+  const headers = await authHeader();
 
-  const created = await post("/v1/sessions", {}, ownerHeaders);
+  const created = await post("/v1/sessions", {}, headers);
   const sessionId = created.body.id;
+  await post(`/v1/sessions/${sessionId}/messages`, { content: "hello" }, headers);
 
-  assert.equal((await get(`/v1/sessions/${sessionId}`, otherHeaders)).status, 404);
-  assert.equal((await del(`/v1/sessions/${sessionId}`, otherHeaders)).status, 404);
+  const { status, body } = await get(`/v1/sessions/${sessionId}`, headers);
+
+  assert.equal(status, 200);
+  assert.equal(body.id, sessionId);
+  assert.equal(body.role, "owner");
+  assert.equal(body.messages, undefined);
 });
 
 test("the first message in a session fills in the title, truncated to ~50 chars", async () => {
@@ -392,8 +515,8 @@ test("POST /v1/sessions/:id/messages rejects empty content", async () => {
   assert.equal((await post(`/v1/sessions/${sessionId}/messages`, { content: "   " }, headers)).status, 400);
 });
 
-test("a session with more than 20 messages only sends the last 20 to the model, but GET returns the full history", async () => {
-  const { post, get, runCalls, chatDb } = harness();
+test("a session with more than 20 messages only sends the last 20 to the model, but every message stays persisted", async () => {
+  const { post, runCalls, chatDb } = harness();
   const headers = await authHeader();
 
   const created = await post("/v1/sessions", {}, headers);
@@ -421,12 +544,11 @@ test("a session with more than 20 messages only sends the last 20 to the model, 
   assert.equal(lastCall.input.messages[0].content, "history message 7");
 
   // Full history (25 seeded + user message + assistant reply = 27) is still
-  // all persisted and returned by GET, nothing is discarded.
-  const session = await get(`/v1/sessions/${sessionId}`, headers);
-  assert.equal(session.body.messages.length, 27);
+  // all persisted, nothing is discarded.
+  assert.equal(chatDb._messages.filter((m) => m.session_id === sessionId).length, 27);
 });
 
-test("DELETE /v1/sessions/:id cascades to its messages", async () => {
+test("DELETE /v1/sessions/:id cascades to its messages and chat_access rows", async () => {
   const { post, get, del, chatDb } = harness();
   const headers = await authHeader();
 
@@ -435,6 +557,7 @@ test("DELETE /v1/sessions/:id cascades to its messages", async () => {
   await post(`/v1/sessions/${sessionId}/messages`, { content: "hello" }, headers);
 
   assert.ok(chatDb._messages.some((m) => m.session_id === sessionId));
+  assert.ok(chatDb._access.some((a) => a.session_id === sessionId));
 
   const { status, body } = await del(`/v1/sessions/${sessionId}`, headers);
   assert.equal(status, 200);
@@ -442,12 +565,13 @@ test("DELETE /v1/sessions/:id cascades to its messages", async () => {
 
   assert.equal(chatDb._sessions.some((s) => s.id === sessionId), false);
   assert.equal(chatDb._messages.some((m) => m.session_id === sessionId), false);
+  assert.equal(chatDb._access.some((a) => a.session_id === sessionId), false);
 
   const afterDelete = await get(`/v1/sessions/${sessionId}`, headers);
   assert.equal(afterDelete.status, 404);
 });
 
-test("GET /v1/sessions lists the user's sessions ordered by updated_at desc", async () => {
+test("GET /v1/sessions lists the user's sessions ordered by updated_at desc, with role and a null next_cursor when done", async () => {
   const { post, get } = harness();
   const headers = await authHeader();
 
@@ -465,9 +589,11 @@ test("GET /v1/sessions lists the user's sessions ordered by updated_at desc", as
   assert.equal(body.data.length, 2);
   assert.equal(body.data[0].id, first.body.id);
   assert.equal(body.data[1].id, second.body.id);
+  assert.equal(body.data[0].role, "owner");
+  assert.equal(body.next_cursor, null);
 });
 
-test("GET /v1/sessions only returns sessions belonging to the authenticated user", async () => {
+test("GET /v1/sessions only returns sessions the caller has chat_access to", async () => {
   const { post, get } = harness();
   const user1Headers = await authHeader({ sub: "user-1", permissions: ["ai:chat"] });
   const user2Headers = await authHeader({ sub: "user-2", permissions: ["ai:chat"] });
@@ -478,4 +604,251 @@ test("GET /v1/sessions only returns sessions belonging to the authenticated user
   const { body } = await get("/v1/sessions", user1Headers);
 
   assert.equal(body.data.length, 1);
+});
+
+test("GET /v1/sessions paginates without losing or duplicating sessions across pages", async () => {
+  const db = createChatDB();
+  for (let i = 1; i <= 25; i++) {
+    seedSession(db, { id: `s${i}`, userId: "user-1" });
+  }
+  const { get } = harness({ CHAT_DB: db });
+  const headers = await authHeader();
+
+  const seen = [];
+  let cursor = null;
+  let pages = 0;
+  do {
+    const path = cursor ? `/v1/sessions?limit=10&cursor=${encodeURIComponent(cursor)}` : "/v1/sessions?limit=10";
+    const { status, body } = await get(path, headers);
+    assert.equal(status, 200);
+    assert.ok(body.data.length <= 10);
+    seen.push(...body.data.map((s) => s.id));
+    cursor = body.next_cursor;
+    pages += 1;
+    assert.ok(pages <= 10, "pagination should terminate well before this many pages");
+  } while (cursor);
+
+  assert.equal(pages, 3);
+  assert.equal(seen.length, 25);
+  assert.equal(new Set(seen).size, 25, "no session id should repeat across pages");
+});
+
+test("GET /v1/sessions/:id/messages paginates the full history without losing or duplicating messages", async () => {
+  const { post, get, chatDb } = harness();
+  const headers = await authHeader();
+
+  const created = await post("/v1/sessions", {}, headers);
+  const sessionId = created.body.id;
+
+  for (let i = 1; i <= 25; i++) {
+    chatDb._messages.push({
+      id: `m${i}`,
+      session_id: sessionId,
+      role: i % 2 === 0 ? "assistant" : "user",
+      content: `message ${i}`,
+      created_at: new Date(Date.UTC(2023, 0, 1, 0, 0, i)).toISOString(),
+    });
+  }
+
+  const seen = [];
+  let cursor = null;
+  let pages = 0;
+  do {
+    const path = cursor
+      ? `/v1/sessions/${sessionId}/messages?limit=10&cursor=${encodeURIComponent(cursor)}`
+      : `/v1/sessions/${sessionId}/messages?limit=10`;
+    const { status, body } = await get(path, headers);
+    assert.equal(status, 200);
+    assert.ok(body.data.length <= 10);
+    seen.push(...body.data.map((m) => m.id));
+    cursor = body.next_cursor;
+    pages += 1;
+    assert.ok(pages <= 10, "pagination should terminate well before this many pages");
+  } while (cursor);
+
+  assert.equal(pages, 3);
+  assert.equal(seen.length, 25);
+  assert.equal(new Set(seen).size, 25, "no message id should repeat across pages");
+  // Oldest first (created_at asc), consistent across page boundaries.
+  assert.deepEqual(
+    seen,
+    Array.from({ length: 25 }, (_, i) => `m${i + 1}`)
+  );
+});
+
+// --- Sharing / ACL (docs/specs/chat-sessions-sharing-and-pagination.md) ---
+
+test("PUT /v1/sessions/:id/access/:userId grants editor: that user can send messages and rename, but not manage access or delete", async () => {
+  const db = createChatDB();
+  seedSession(db, { id: "s1", owners: ["user-1"] });
+  const { put, post, patch, del } = harness({ CHAT_DB: db });
+  const ownerHeaders = await authHeader({ sub: "user-1", permissions: ["ai:chat"] });
+  const editorHeaders = await authHeader({ sub: "user-2", permissions: ["ai:chat"] });
+
+  const granted = await put("/v1/sessions/s1/access/user-2", { role: "editor" }, ownerHeaders);
+  assert.equal(granted.status, 200);
+  assert.deepEqual(granted.body.data, { session_id: "s1", user_id: "user-2", role: "editor" });
+
+  assert.equal((await post("/v1/sessions/s1/messages", { content: "hi" }, editorHeaders)).status, 200);
+  assert.equal((await patch("/v1/sessions/s1", { title: "renamed" }, editorHeaders)).status, 200);
+
+  assert.equal((await put("/v1/sessions/s1/access/user-3", { role: "viewer" }, editorHeaders)).status, 403);
+  assert.equal((await del("/v1/sessions/s1/access/user-1", editorHeaders)).status, 403);
+  assert.equal((await del("/v1/sessions/s1", editorHeaders)).status, 403);
+});
+
+test("a viewer cannot send messages, rename, or delete the session (403)", async () => {
+  const db = createChatDB();
+  seedSession(db, { id: "s1", owners: ["user-1"], viewers: ["user-2"] });
+  const { post, patch, del } = harness({ CHAT_DB: db });
+  const viewerHeaders = await authHeader({ sub: "user-2", permissions: ["ai:chat"] });
+
+  assert.equal((await post("/v1/sessions/s1/messages", { content: "hi" }, viewerHeaders)).status, 403);
+  assert.equal((await patch("/v1/sessions/s1", { title: "x" }, viewerHeaders)).status, 403);
+  assert.equal((await del("/v1/sessions/s1", viewerHeaders)).status, 403);
+});
+
+test("PUT /v1/sessions/:id/access/:userId rejects an invalid role with 400", async () => {
+  const db = createChatDB();
+  seedSession(db, { id: "s1", owners: ["user-1"] });
+  const { put } = harness({ CHAT_DB: db });
+  const headers = await authHeader();
+
+  const { status, body } = await put("/v1/sessions/s1/access/user-2", { role: "admin" }, headers);
+
+  assert.equal(status, 400);
+  assert.match(body.error.message, /role/);
+});
+
+test("PUT /v1/sessions/:id/access/:userId rejects downgrading the sole owner with 409", async () => {
+  const db = createChatDB();
+  seedSession(db, { id: "s1", owners: ["user-1"] });
+  const { put } = harness({ CHAT_DB: db });
+  const headers = await authHeader();
+
+  const { status, body } = await put("/v1/sessions/s1/access/user-1", { role: "editor" }, headers);
+
+  assert.equal(status, 409);
+  assert.match(body.error.message, /at least one owner/);
+});
+
+test("PUT /v1/sessions/:id/access/:userId upserts: granting to an existing collaborator updates the role instead of duplicating", async () => {
+  const db = createChatDB();
+  seedSession(db, { id: "s1", owners: ["user-1"], viewers: ["user-2"] });
+  const { put } = harness({ CHAT_DB: db });
+  const headers = await authHeader();
+
+  const { status, body } = await put("/v1/sessions/s1/access/user-2", { role: "editor" }, headers);
+
+  assert.equal(status, 200);
+  assert.equal(body.data.role, "editor");
+  assert.equal(db._access.filter((a) => a.user_id === "user-2").length, 1);
+  assert.equal(db._access.find((a) => a.user_id === "user-2").role, "editor");
+});
+
+test("DELETE /v1/sessions/:id/access/:userId of oneself succeeds even as a mere viewer", async () => {
+  const db = createChatDB();
+  seedSession(db, { id: "s1", owners: ["user-1"], viewers: ["user-2"] });
+  const { del } = harness({ CHAT_DB: db });
+  const viewerHeaders = await authHeader({ sub: "user-2", permissions: ["ai:chat"] });
+
+  const { status } = await del("/v1/sessions/s1/access/user-2", viewerHeaders);
+
+  assert.equal(status, 200);
+  assert.equal(db._access.some((a) => a.user_id === "user-2"), false);
+});
+
+test("DELETE /v1/sessions/:id/access/:userId rejects removing the sole owner, self or by another owner, with 409", async () => {
+  const db = createChatDB();
+  seedSession(db, { id: "s1", owners: ["user-1"] });
+  const { del } = harness({ CHAT_DB: db });
+  const selfHeaders = await authHeader({ sub: "user-1", permissions: ["ai:chat"] });
+
+  const selfRemoval = await del("/v1/sessions/s1/access/user-1", selfHeaders);
+  assert.equal(selfRemoval.status, 409);
+  assert.match(selfRemoval.body.error.message, /at least one owner/);
+
+  const db2 = createChatDB();
+  seedSession(db2, { id: "s2", owners: ["user-1", "user-2"] });
+  const { del: del2 } = harness({ CHAT_DB: db2 });
+  const otherOwnerHeaders = await authHeader({ sub: "user-1", permissions: ["ai:chat"] });
+
+  const firstRemoval = await del2("/v1/sessions/s2/access/user-2", otherOwnerHeaders);
+  assert.equal(firstRemoval.status, 200);
+
+  const lastOwnerRemoval = await del2("/v1/sessions/s2/access/user-1", otherOwnerHeaders);
+  assert.equal(lastOwnerRemoval.status, 409);
+  assert.match(lastOwnerRemoval.body.error.message, /at least one owner/);
+});
+
+test("DELETE /v1/sessions/:id/access/:userId returns 404 when the target has no access row", async () => {
+  const db = createChatDB();
+  seedSession(db, { id: "s1", owners: ["user-1"] });
+  const { del } = harness({ CHAT_DB: db });
+  const headers = await authHeader();
+
+  const { status, body } = await del("/v1/sessions/s1/access/user-2", headers);
+
+  assert.equal(status, 404);
+  assert.match(body.error.message, /not found/i);
+});
+
+test("GET /v1/sessions/:id/access can be called by a viewer and lists every collaborator", async () => {
+  const db = createChatDB();
+  seedSession(db, { id: "s1", owners: ["user-2"], viewers: ["user-1"] });
+  const { get } = harness({ CHAT_DB: db });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:chat"] });
+
+  const { status, body } = await get("/v1/sessions/s1/access", headers);
+
+  assert.equal(status, 200);
+  assert.equal(body.count, 2);
+  const byUser = Object.fromEntries(body.data.map((row) => [row.user_id, row.role]));
+  assert.equal(byUser["user-1"], "viewer");
+  assert.equal(byUser["user-2"], "owner");
+});
+
+test("access routes 404 for a session no one has access to (nonexistent session)", async () => {
+  const { put, del, get } = harness();
+  const headers = await authHeader();
+
+  assert.equal((await put("/v1/sessions/missing/access/user-2", { role: "viewer" }, headers)).status, 404);
+  assert.equal((await del("/v1/sessions/missing/access/user-2", headers)).status, 404);
+  assert.equal((await get("/v1/sessions/missing/access", headers)).status, 404);
+});
+
+test("PATCH /v1/sessions/:id renames the session and rejects invalid titles", async () => {
+  const db = createChatDB();
+  seedSession(db, { id: "s1", owners: ["user-1"] });
+  const { patch } = harness({ CHAT_DB: db });
+  const headers = await authHeader();
+
+  const renamed = await patch("/v1/sessions/s1", { title: "New title" }, headers);
+  assert.equal(renamed.status, 200);
+  assert.equal(renamed.body.title, "New title");
+  assert.equal(renamed.body.role, "owner");
+
+  assert.equal((await patch("/v1/sessions/s1", { title: "" }, headers)).status, 400);
+  assert.equal((await patch("/v1/sessions/s1", { title: "   " }, headers)).status, 400);
+  assert.equal((await patch("/v1/sessions/s1", { title: "a".repeat(201) }, headers)).status, 400);
+  assert.equal((await patch("/v1/sessions/s1", { title: "a".repeat(200) }, headers)).status, 200);
+});
+
+test("a session created before the chat_access migration works after a simulated backfill", async () => {
+  // Simulates a session row that predates migration 0015 (chat_access): it
+  // exists in chat_sessions but has no corresponding chat_access row yet.
+  const db = createChatDB();
+  db._sessions.push({ id: "legacy-1", user_id: "user-1", title: null, created_at: "t0", updated_at: "t0" });
+  const { get } = harness({ CHAT_DB: db });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:chat"] });
+
+  const beforeBackfill = await get("/v1/sessions/legacy-1", headers);
+  assert.equal(beforeBackfill.status, 404);
+
+  // The migration's backfill inserts an owner row for chat_sessions.user_id.
+  db._access.push({ id: "backfill-1", session_id: "legacy-1", user_id: "user-1", role: "owner", created_at: db._nextTimestamp() });
+
+  const afterBackfill = await get("/v1/sessions/legacy-1", headers);
+  assert.equal(afterBackfill.status, 200);
+  assert.equal(afterBackfill.body.role, "owner");
 });
