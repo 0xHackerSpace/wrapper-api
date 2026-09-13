@@ -1,5 +1,6 @@
 .terraform/
 node_modules/
+terraform/workers/*/dist/
 *.tfstate
 *.tfstate.*
 *.tfvars.local
