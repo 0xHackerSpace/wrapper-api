@@ -41,12 +41,16 @@ variable "bindings" {
   nullable    = false
 }
 
-variable "routes" {
-  description = "Zone routes that invoke this Worker."
-  type = list(object({
-    zone_id = string
-    pattern = string
-  }))
-  default  = []
-  nullable = false
+variable "subdomain_enabled" {
+  description = "Enable the workers.dev subdomain for this script."
+  type        = bool
+  default     = true
+  nullable    = false
+}
+
+variable "previews_enabled" {
+  description = "Enable preview URLs for this script."
+  type        = bool
+  default     = false
+  nullable    = false
 }

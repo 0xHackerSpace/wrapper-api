@@ -1,17 +1,26 @@
 // Retrieval-augmented generation Worker. Every account, bucket, index and model name arrives through
 // bindings declared by Terraform, so this file stays environment agnostic.
 
+import { WorkerEntrypoint } from "cloudflare:workers";
+import { verifyToken } from "./lib/jwt.mjs";
+import { extractEntities } from "./lib/entity-extraction.mjs";
+import { syncEntitiesToGraph } from "./lib/graph-sync.mjs";
+
 const SERVICE = "rag";
 const METADATA_TEXT_LIMIT = 2048;
 const EMBEDDING_BATCH = 50;
 const MAX_DOCUMENT_LENGTH = 512 * 1024;
 const MAX_QUESTION_LENGTH = 2000;
 const MAX_METADATA_ENTRIES = 16;
+// Entity extraction runs once per ingested document (not per chunk) to avoid firing many
+// small LLM calls, but the prompt is still bounded regardless of document size.
+const ENTITY_EXTRACTION_TEXT_LIMIT = 8000;
 
 const DEFAULTS = {
   chunkSize: 1200,
   chunkOverlap: 150,
   topK: 5,
+  graphId: "rag-documents",
 };
 
 const SYSTEM_PROMPT = [
@@ -65,28 +74,31 @@ function requireBindings(env) {
   }
 }
 
-// Constant-time comparison so a bound token cannot be recovered by timing the endpoint.
-function secretsMatch(provided, expected) {
-  const encoder = new TextEncoder();
-  const left = encoder.encode(provided);
-  const right = encoder.encode(expected);
-  let mismatch = left.length ^ right.length;
-  for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
-    mismatch |= (left[index] ?? 0) ^ (right[index] ?? 0);
-  }
-  return mismatch === 0;
-}
-
-// Authentication is opt-in: it applies only when an AUTH_TOKEN binding is attached to the Worker.
-function authorize(request, env) {
-  if (!env.AUTH_TOKEN) {
+// JWT authentication: validates Bearer token from Authorization header and,
+// when a permission is given, checks it against the token's permissions claim.
+async function authorize(request, env, permission) {
+  if (!env.JWT_SECRET) {
     return;
   }
+
   const header = request.headers.get("authorization") ?? "";
-  const provided = header.startsWith("Bearer ") ? header.slice(7) : "";
-  if (!secretsMatch(provided, env.AUTH_TOKEN)) {
-    throw new HttpError(401, "unauthorized");
+
+  if (!header.startsWith("Bearer ")) {
+    throw new HttpError(401, "Missing or invalid authorization header");
   }
+
+  const token = header.slice(7);
+  const payload = await verifyToken(token, env.JWT_SECRET);
+
+  if (!payload) {
+    throw new HttpError(401, "Invalid or expired token");
+  }
+
+  if (permission && (!Array.isArray(payload.permissions) || !payload.permissions.includes(permission))) {
+    throw new HttpError(403, `Missing required permission: ${permission}`);
+  }
+
+  return payload;
 }
 
 async function readJson(request) {
@@ -107,6 +119,16 @@ function documentId(value) {
   }
   if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value)) {
     throw new HttpError(400, "id must match [A-Za-z0-9][A-Za-z0-9._-]{0,127}");
+  }
+  return value;
+}
+
+function graphIdentifier(value) {
+  if (value === undefined || value === null) {
+    return DEFAULTS.graphId;
+  }
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new HttpError(400, "field 'graphId' must be a non-empty string");
   }
   return value;
 }
@@ -198,7 +220,31 @@ function health(env, config) {
   });
 }
 
-async function ingest(request, env, config) {
+// Fire-and-forget entity extraction + graph sync for a freshly ingested document. Runs
+// via ctx.waitUntil() so it never delays or fails the /ingest response (which has
+// already been sent by the time this settles). Skips silently -- logging, not throwing
+// -- when AI_WORKER/GRAPH_WORKER aren't bound (e.g. most test/dev environments) or when
+// no ctx is available to extend the request lifetime.
+function scheduleGraphEnrichment(ctx, env, graphId, docId, text) {
+  if (!env.AI_WORKER || !env.GRAPH_WORKER) {
+    console.warn("rag: skipping graph enrichment, AI_WORKER/GRAPH_WORKER binding not configured");
+    return;
+  }
+  if (!ctx || typeof ctx.waitUntil !== "function") {
+    return;
+  }
+
+  ctx.waitUntil(
+    (async () => {
+      const extracted = await extractEntities(env.AI_WORKER, text.slice(0, ENTITY_EXTRACTION_TEXT_LIMIT));
+      if (extracted.entities.length > 0) {
+        await syncEntitiesToGraph(env.GRAPH_WORKER, graphId, docId, extracted);
+      }
+    })().catch((error) => console.error("rag: graph enrichment failed", error)),
+  );
+}
+
+async function ingest(request, env, config, ctx) {
   const body = await readJson(request);
   const text = typeof body.text === "string" ? body.text.trim() : "";
   if (text.length === 0) {
@@ -214,6 +260,7 @@ async function ingest(request, env, config) {
   const id = documentId(body.id);
   const source = body.source ?? id;
   const metadata = extraMetadata(body.metadata);
+  const graphId = graphIdentifier(body.graphId);
   const pieces = chunk(text, config.chunkSize, config.chunkOverlap);
   if (pieces.length === 0) {
     throw new HttpError(400, "field 'text' produced no chunks");
@@ -246,6 +293,7 @@ async function ingest(request, env, config) {
     documentId: id,
     source,
     metadata,
+    graphId,
     sourceKey,
     chunkCount: vectors.length,
     chunkSize: config.chunkSize,
@@ -259,6 +307,8 @@ async function ingest(request, env, config) {
     customMetadata: { documentId: id },
   });
 
+  scheduleGraphEnrichment(ctx, env, graphId, id, text);
+
   return json(
     {
       documentId: id,
@@ -271,25 +321,26 @@ async function ingest(request, env, config) {
   );
 }
 
-async function query(request, env, config) {
-  const body = await readJson(request);
-  const question = typeof body.question === "string" ? body.question.trim() : "";
-  if (question.length === 0) {
+// Pure retrieval+generation logic shared by the HTTP /query handler and the RPC
+// query() method (the latter reused by graphrag-worker in Fase 4 of the roadmap).
+async function runQuery(env, config, question, { topK: topKOverride, filter } = {}) {
+  const trimmedQuestion = typeof question === "string" ? question.trim() : "";
+  if (trimmedQuestion.length === 0) {
     throw new HttpError(400, "field 'question' is required and must be a non-empty string");
   }
-  if (question.length > MAX_QUESTION_LENGTH) {
+  if (trimmedQuestion.length > MAX_QUESTION_LENGTH) {
     throw new HttpError(413, `field 'question' must be at most ${MAX_QUESTION_LENGTH} characters`);
   }
-  if (body.filter !== undefined && (typeof body.filter !== "object" || body.filter === null || Array.isArray(body.filter))) {
+  if (filter !== undefined && (typeof filter !== "object" || filter === null || Array.isArray(filter))) {
     throw new HttpError(400, "field 'filter' must be a JSON object");
   }
 
-  const topK = clamp(integer(body.topK, config.topK), 1, 50);
-  const [vector] = await embed(env, [question]);
+  const topK = clamp(integer(topKOverride, config.topK), 1, 50);
+  const [vector] = await embed(env, [trimmedQuestion]);
   const search = await env.VECTORIZE.query(vector, {
     topK,
     returnMetadata: "all",
-    ...(body.filter === undefined ? {} : { filter: body.filter }),
+    ...(filter === undefined ? {} : { filter }),
   });
 
   const matches = Array.isArray(search?.matches) ? search.matches : [];
@@ -309,32 +360,39 @@ async function query(request, env, config) {
     .filter((entry) => entry !== null);
 
   if (context.length === 0) {
-    return json({
-      question,
+    return {
+      question: trimmedQuestion,
       answer: "There is no indexed context available to answer this question.",
       sources,
-    });
+    };
   }
 
   const completion = await env.AI.run(env.GENERATION_MODEL, {
     messages: [
       { role: "system", content: SYSTEM_PROMPT },
-      { role: "user", content: `Context:\n${context.join("\n\n")}\n\nQuestion: ${question}` },
+      { role: "user", content: `Context:\n${context.join("\n\n")}\n\nQuestion: ${trimmedQuestion}` },
     ],
   });
   const answer = typeof completion === "string" ? completion : (completion?.response ?? "");
 
-  return json({ question, answer, sources });
+  return { question: trimmedQuestion, answer, sources };
+}
+
+async function query(request, env, config) {
+  const body = await readJson(request);
+  const result = await runQuery(env, config, body.question, { topK: body.topK, filter: body.filter });
+  return json(result);
 }
 
 const ROUTES = {
   "/health": { method: "GET", handler: (request, env, config) => health(env, config), authenticated: false },
-  "/ingest": { method: "POST", handler: ingest, authenticated: true },
-  "/query": { method: "POST", handler: query, authenticated: true },
+  "/ingest": { method: "POST", handler: ingest, authenticated: true, permission: "rag:ingest" },
+  "/query": { method: "POST", handler: query, authenticated: true, permission: "rag:query" },
 };
 
-export default {
-  async fetch(request, env, ctx) {
+export default class extends WorkerEntrypoint {
+  async fetch(request) {
+    const env = this.env;
     const { pathname } = new URL(request.url);
     const route = ROUTES[pathname.replace(/\/+$/, "") || "/health"];
 
@@ -348,9 +406,9 @@ export default {
     try {
       requireBindings(env);
       if (route.authenticated) {
-        authorize(request, env);
+        await authorize(request, env, route.permission);
       }
-      return await route.handler(request, env, configuration(env));
+      return await route.handler(request, env, configuration(env), this.ctx);
     } catch (error) {
       if (error instanceof HttpError) {
         return json({ error: error.message }, { status: error.status });
@@ -358,5 +416,14 @@ export default {
       console.error(error);
       return json({ error: "internal error" }, { status: 500 });
     }
-  },
-};
+  }
+
+  // RPC entrypoint for other workers via Service Bindings (graphrag-worker, Fase 4 of
+  // the GraphRAG roadmap). No requirePermission/JWT here: Service Bindings are only
+  // reachable from within the same Cloudflare account -- same convention as
+  // ai-worker's chat() and graph-worker's RPC surface.
+  async query(question, opts = {}) {
+    requireBindings(this.env);
+    return runQuery(this.env, configuration(this.env), question, opts);
+  }
+}

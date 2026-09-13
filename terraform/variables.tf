@@ -18,6 +18,26 @@ variable "environment" {
   }
 }
 
+variable "workers_subdomain" {
+  description = "Cloudflare account subdomain for workers.dev URLs (e.g., '0xhackerspace' for *.0xhackerspace.workers.dev)."
+  type        = string
+  nullable    = false
+}
+
+variable "cloudflare_api_token" {
+  description = "Cloudflare API token for running D1 migrations."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "jwt_secret" {
+  description = "JWT secret key for signing and verifying tokens."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
 variable "kv_namespaces" {
   description = "KV namespaces keyed by a stable logical name."
   type        = map(object({ title = optional(string) }))
@@ -42,6 +62,8 @@ variable "d1_databases" {
   type = map(object({
     name                  = optional(string)
     primary_location_hint = optional(string)
+    run_migrations        = optional(bool, false)
+    migrations            = optional(list(string), [])
   }))
   default  = {}
   nullable = false
@@ -70,21 +92,25 @@ variable "dns_records" {
 }
 
 variable "workers" {
-  description = "Workers and their routes. Binding resource_key references a resource collection key."
+  description = "Workers and their configuration. Binding resource_key references a resource collection key."
   type = map(object({
     script_path        = string
     script_name        = optional(string)
     compatibility_date = string
-    routes = optional(list(object({
-      zone_id = string
-      pattern = string
-    })), [])
+    subdomain_enabled  = optional(bool, true)
+    previews_enabled   = optional(bool, false)
     bindings = optional(list(object({
       name         = string
       type         = string
-      resource_key = string
+      resource_key = optional(string)
     })), [])
     additional_bindings = optional(list(map(string)), [])
+    service_bindings = optional(list(object({
+      name          = string
+      target_worker = optional(string) # key in var.workers
+      target_rag    = optional(string) # key in var.rag_stacks
+      entrypoint    = optional(string) # WorkerEntrypoint class name, if not the default export
+    })), [])
   }))
   default  = {}
   nullable = false
@@ -96,6 +122,8 @@ variable "rag_stacks" {
     script_path          = string
     compatibility_date   = string
     name                 = optional(string)
+    subdomain_enabled    = optional(bool, true)
+    previews_enabled     = optional(bool, false)
     bucket_name          = optional(string)
     bucket_location      = optional(string)
     bucket_jurisdiction  = optional(string)
@@ -109,11 +137,13 @@ variable "rag_stacks" {
     chunk_overlap        = optional(number)
     top_k                = optional(number)
     metadata_indexes     = optional(map(string), { documentId = "string", source = "string" })
-    routes = optional(list(object({
-      zone_id = string
-      pattern = string
+    additional_bindings  = optional(list(map(string)), [])
+    service_bindings = optional(list(object({
+      name          = string
+      target_worker = optional(string) # key in var.workers
+      target_rag    = optional(string) # key in var.rag_stacks
+      entrypoint    = optional(string) # WorkerEntrypoint class name, if not the default export
     })), [])
-    additional_bindings = optional(list(map(string)), [])
   }))
   default  = {}
   nullable = false

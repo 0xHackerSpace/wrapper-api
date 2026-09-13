@@ -1,5 +1,8 @@
 .terraform/
+node_modules/
 *.tfstate
 *.tfstate.*
 *.tfvars.local
 crash.log
+.env
+.claude/settings.local.json

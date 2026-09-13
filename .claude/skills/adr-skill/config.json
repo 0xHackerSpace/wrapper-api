@@ -1,0 +1,41 @@
+{
+  "name": "adr-skill",
+  "version": "1.0.0",
+  "description": "Create or update Architecture Decision Records (ADRs) in /docs/decisions with deterministic numbering and consistent formatting.",
+  "entrypoint": "index.js",
+  "commands": [
+    {
+      "name": "create",
+      "description": "Create a new ADR with auto-incremented number",
+      "usage": "adr-skill create \"Title of Decision\"",
+      "args": ["title"]
+    },
+    {
+      "name": "update",
+      "description": "Update an existing ADR",
+      "usage": "adr-skill update NNNN",
+      "args": ["adrNumber"]
+    },
+    {
+      "name": "validate",
+      "description": "Validate ADR format and completeness",
+      "usage": "adr-skill validate NNNN",
+      "args": ["adrNumber"]
+    },
+    {
+      "name": "list",
+      "description": "List all existing ADRs",
+      "usage": "adr-skill list",
+      "args": []
+    }
+  ],
+  "deterministic": true,
+  "reads_from": ["./docs/decisions/"],
+  "writes_to": ["./docs/decisions/"],
+  "capabilities": {
+    "auto_numbering": "Scans /docs/decisions/ to determine next ADR number",
+    "slug_generation": "Converts title to kebab-case filename automatically",
+    "template_consistency": "Uses fixed template structure for all ADRs",
+    "validation": "Checks title, filename, and format consistency"
+  }
+}

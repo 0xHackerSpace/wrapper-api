@@ -1,0 +1,606 @@
+### Wrapper API - HTTP Requests
+### Use REST Client extension in VS Code to run these requests
+
+@baseUrlAuth=https://dev-auth.0xhackerspace.workers.dev
+@baseUrlApi=https://dev-api.0xhackerspace.workers.dev
+@baseUrlRag=https://dev-rag.0xhackerspace.workers.dev
+@baseUrlAI=https://dev-ai.0xhackerspace.workers.dev
+@baseUrlGraph=https://dev-graph.0xhackerspace.workers.dev
+@baseUrlGraphRAG=https://dev-graphrag.0xhackerspace.workers.dev
+@graphId=COLE_AQUI_O_ID_RETORNADO_POR_POST_/v1/graphs
+@jwtToken=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIzMjhmMWE3Ny1hNGEzLTRlYTctOWNjMS03OTY1NzEyNTJhNzEiLCJ1c2VybmFtZSI6Imlhbm9saXYiLCJ0eXBlIjoiYWNjZXNzIiwicGVybWlzc2lvbnMiOlsiYXBpOmFjY2VzcyIsImFwaTphY2Nlc3MiLCJhcGk6YWNjZXNzIiwiYXBpOmFjY2VzcyIsImFwaTphY2Nlc3MiLCJhdXRoOmxvZ2luIiwiYXV0aDpsb2dpbiIsImF1dGg6bG9naW4iLCJhdXRoOmxvZ2luIiwiYXV0aDpsb2dpbiIsImF1dGg6bG9naW4iLCJhdXRoOmxvZ2luIiwiYXV0aDpsb2dpbiIsImF1dGg6bG9nb3V0IiwiYXV0aDpsb2dvdXQiLCJhdXRoOmxvZ291dCIsImF1dGg6bG9nb3V0IiwiYXV0aDpsb2dvdXQiLCJhdXRoOmxvZ291dCIsImF1dGg6bG9nb3V0IiwiZ3JhcGg6cmVhZCIsImdyYXBoOnJlYWQiLCJncmFwaDpyZWFkIiwiZ3JhcGg6d3JpdGUiLCJncmFwaDp3cml0ZSIsImluZ3JlZGllbnQ6Y3JlYXRlIiwiaW5ncmVkaWVudDpjcmVhdGUiLCJpbmdyZWRpZW50OmRlbGV0ZSIsImluZ3JlZGllbnQ6ZGVsZXRlIiwiaW5ncmVkaWVudDpyZWFkIiwiaW5ncmVkaWVudDpyZWFkIiwiaW5ncmVkaWVudDpyZWFkIiwiaW5ncmVkaWVudDp1cGRhdGUiLCJpbmdyZWRpZW50OnVwZGF0ZSIsInBlcm1pc3Npb246Y3JlYXRlIiwicGVybWlzc2lvbjpkZWxldGUiLCJwZXJtaXNzaW9uOnJlYWQiLCJwZXJtaXNzaW9uOnVwZGF0ZSIsInByb2ZpbGU6Y3JlYXRlIiwicHJvZmlsZTpkZWxldGUiLCJwcm9maWxlOnJlYWQiLCJwcm9maWxlOnVwZGF0ZSIsInJhZzppbmdlc3QiLCJyYWc6aW5nZXN0IiwicmFnOnF1ZXJ5IiwicmFnOnF1ZXJ5IiwicmFnOnF1ZXJ5IiwicmFnOnF1ZXJ5IiwidXNlcjpjcmVhdGUiLCJ1c2VyOmRlbGV0ZSIsInVzZXI6cmVhZCIsInVzZXI6cmVhZCIsInVzZXI6dXBkYXRlIl0sInByb2ZpbGVzIjpbIkFkbWluIiwiQVBJIFVzZXIiLCJHcmFwaCBVc2VyIiwiR3Vlc3QiLCJJbmdyZWRpZW50IEFkbWluIiwiSW5ncmVkaWVudCBVc2VyIiwiUkFHIFVzZXIiLCJVc2VyIl0sImlhdCI6MTc4OTIwMTMxMiwiZXhwIjoxNzg5MjA0OTEyfQ.VA7SGv-bZ6Aw3uW0Ii3GJvtJnKDFLcRkiHzUtm2KODc
+
+### ============================================
+### AUTH WORKER
+### ============================================
+
+### Signup
+POST {{baseUrlAuth}}/signup
+Content-Type: application/json
+
+{
+  "username": "ianoliv",
+  "email": "ian.oliv@outlook.com",
+  "password": "password123"
+}
+
+### Login
+POST {{baseUrlAuth}}/login
+Content-Type: application/json
+
+{
+  "username": "ianoliv",
+  "password": "password123"
+}
+
+### Logout
+POST {{baseUrlAuth}}/logout
+Authorization: Bearer {{jwtToken}}
+
+### Get aggregate user stats (requires auth:stats permission, Admin only)
+GET {{baseUrlAuth}}/stats
+Authorization: Bearer {{jwtToken}}
+
+### Get stats without a token (expect 401)
+GET {{baseUrlAuth}}/stats
+
+### Get stats with a valid token that lacks auth:stats (e.g. profile User, expect 403)
+GET {{baseUrlAuth}}/stats
+Authorization: Bearer token-de-usuario-sem-permissao-auth-stats
+
+### ============================================
+### INGREDIENTS API
+### ============================================
+
+### List all ingredients
+GET {{baseUrlApi}}/ingredients
+Authorization: Bearer {{jwtToken}}
+
+### Get ingredient by ID
+GET {{baseUrlApi}}/ingredients/1a2b3c4d-5e6f-7g8h-9i0j-1k2l3m4n5o6p
+Authorization: Bearer {{jwtToken}}
+
+### Create ingredient
+POST {{baseUrlApi}}/ingredients
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "nome": "Alho",
+  "slug": "alho",
+  "type": "tempero",
+  "reference": "https://en.wikipedia.org/wiki/Garlic",
+  "url": "https://example.com/alho",
+  "permissions": "public"
+}
+
+### Create ingredient (minimal - required fields only)
+POST {{baseUrlApi}}/ingredients
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "nome": "Cebola",
+  "slug": "cebola",
+  "type": "vegetal"
+}
+
+### Update ingredient
+PUT {{baseUrlApi}}/ingredients/1a2b3c4d-5e6f-7g8h-9i0j-1k2l3m4n5o6p
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "nome": "Alho fresco",
+  "reference": "https://pt.wikipedia.org/wiki/Alho"
+}
+
+### Delete ingredient
+DELETE {{baseUrlApi}}/ingredients/1a2b3c4d-5e6f-7g8h-9i0j-1k2l3m4n5o6p
+Authorization: Bearer {{jwtToken}}
+
+### Get direct recommendations for an ingredient (graph neighbors, e.g. "pairs_well_with")
+GET {{baseUrlApi}}/ingredients/1a2b3c4d-5e6f-7g8h-9i0j-1k2l3m4n5o6p/recommendations
+Authorization: Bearer {{jwtToken}}
+
+### Get direct recommendations filtered by relation
+GET {{baseUrlApi}}/ingredients/1a2b3c4d-5e6f-7g8h-9i0j-1k2l3m4n5o6p/recommendations?relation=pairs_well_with
+Authorization: Bearer {{jwtToken}}
+
+### Get indirect recommendations (multi-hop traversal via graph-worker findPaths)
+GET {{baseUrlApi}}/ingredients/1a2b3c4d-5e6f-7g8h-9i0j-1k2l3m4n5o6p/recommendations?indirect=true&maxDepth=3
+Authorization: Bearer {{jwtToken}}
+
+### Recommendations for an ingredient without a graph node yet (expect 200, empty list, not an error)
+GET {{baseUrlApi}}/ingredients/2b3c4d5e-6f7g-8h9i-0j1k-2l3m4n5o6p7q/recommendations
+Authorization: Bearer {{jwtToken}}
+
+### Recommendations for an ingredient that doesn't exist (expect 404)
+GET {{baseUrlApi}}/ingredients/00000000-0000-0000-0000-000000000000/recommendations
+Authorization: Bearer {{jwtToken}}
+
+### ============================================
+### RAG WORKER
+### ============================================
+
+### Query RAG
+POST {{baseUrlRag}}/query
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "question": "Como preparar alho?",
+  "topK": 5
+}
+
+### Ingest content (default graphId "rag-documents" for automatic entity/relation enrichment)
+POST {{baseUrlRag}}/ingest
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "text": "Alho é um tempero versátil usado em muitas culinárias...",
+  "source": "wikipedia",
+  "metadata": {
+    "type": "ingredient"
+  }
+}
+
+### Ingest content with an explicit graphId (routes automatic enrichment to a different graph)
+POST {{baseUrlRag}}/ingest
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "text": "Alho combina bem com azeite, limão e ervas frescas em receitas mediterrâneas.",
+  "source": "wikipedia",
+  "graphId": "ingredients",
+  "metadata": {
+    "type": "ingredient"
+  }
+}
+
+### ============================================
+### AI WORKER (OpenAI-compatible)
+### ============================================
+
+### List available models (public, no auth required)
+GET {{baseUrlAI}}/v1/models
+
+### Chat completion (with system instruction, requires ai:chat permission, Admin only)
+POST {{baseUrlAI}}/v1/chat/completions
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "model": "@cf/mistral/mistral-7b-instruct-v0.1",
+  "messages": [
+    {
+      "role": "system",
+      "content": "Você é um assistente útil e amigável que responde perguntas de forma clara e concisa.me responda apenas em português."
+    },
+    {
+      "role": "user",
+      "content": "qual a capital da França?"
+    }
+  ],
+  "temperature": 0.7,
+  "max_tokens": 512
+}
+
+### Chat completion (minimal, requires ai:chat permission, Admin only)
+POST {{baseUrlAI}}/v1/chat/completions
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Explique como fazer uma receita de alho"
+    }
+  ]
+}
+
+### Chat completion without a token (expect 401)
+POST {{baseUrlAI}}/v1/chat/completions
+Content-Type: application/json
+
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Explique como fazer uma receita de alho"
+    }
+  ]
+}
+
+### Chat completion with a valid token that lacks ai:chat (e.g. profile User, expect 403)
+POST {{baseUrlAI}}/v1/chat/completions
+Content-Type: application/json
+Authorization: Bearer token-de-usuario-sem-permissao-ai-chat
+
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Explique como fazer uma receita de alho"
+    }
+  ]
+}
+
+### ============================================
+### GRAPH WORKER (knowledge graph)
+### ============================================
+
+### Health check
+GET {{baseUrlGraph}}/health
+
+### --- Grafos (containers isolados) ---
+
+### Create a graph (creator automatically becomes owner)
+POST {{baseUrlGraph}}/v1/graphs
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "name": "Ingredientes"
+}
+
+### List graphs the caller has access to (owner/editor/viewer)
+GET {{baseUrlGraph}}/v1/graphs
+Authorization: Bearer {{jwtToken}}
+
+### --- Nodes e edges (sempre dentro de um grafo) ---
+### Copie o "id" retornado por POST /v1/graphs para @graphId no topo do arquivo
+
+### Create node (entity)
+POST {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "type": "ingredient",
+  "label": "Alho",
+  "properties": {
+    "origin": "Ásia Central"
+  },
+  "source_document_id": "doc-alho-001"
+}
+
+### Create another node (to link as neighbor)
+POST {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "type": "ingredient",
+  "label": "Cebola",
+  "properties": {
+    "origin": "Ásia Central"
+  }
+}
+### Create another node (to link as neighbor)
+POST {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "type": "ingredient",
+  "label": "queijo suico",
+  "properties": {
+    "origin": "Europa"
+  }
+}
+
+### Get node by ID
+GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes/1a2b3c4d-5e6f-7g8h-9i0j-1k2l3m4n5o6p
+Authorization: Bearer {{jwtToken}}
+
+### List nodes by type
+GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes?type=ingredient
+Authorization: Bearer {{jwtToken}}
+
+### List nodes by type and label (case-insensitive filter)
+GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes?type=ingredient&label=Alho
+Authorization: Bearer {{jwtToken}}
+
+### Update a node's label/properties
+PUT {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes/1a2b3c4d-5e6f-7g8h-9i0j-1k2l3m4n5o6p
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "label": "Alho (fresco)",
+  "properties": {
+    "origin": "Ásia Central",
+    "notes": "atualizado após colheita"
+  }
+}
+
+### Delete a node (cascades to its edges)
+DELETE {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes/1a2b3c4d-5e6f-7g8h-9i0j-1k2l3m4n5o6p
+Authorization: Bearer {{jwtToken}}
+
+### Create edge (relation between two nodes)
+POST {{baseUrlGraph}}/v1/graphs/{{graphId}}/edges
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "from_node_id": "1a2b3c4d-5e6f-7g8h-9i0j-1k2l3m4n5o6p",
+  "to_node_id": "2b3c4d5e-6f7g-8h9i-0j1k-2l3m4n5o6p7q",
+  "relation": "combines_with",
+  "properties": {
+    "context": "receitas de tempero"
+  }
+}
+
+### List neighbors of a node
+GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes/0aba4e07-e3ee-4b50-abd2-dd1f6a32e834/neighbors
+Authorization: Bearer {{jwtToken}}
+
+### List neighbors filtered by relation and node type
+GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes/0aba4e07-e3ee-4b50-abd2-dd1f6a32e834/neighbors?relation=combines_with&type=ingredient
+Authorization: Bearer {{jwtToken}}
+
+### Check direct relations between two nodes
+GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes/1a2b3c4d-5e6f-7g8h-9i0j-1k2l3m4n5o6p/relations?to=2b3c4d5e-6f7g-8h9i-0j1k-2l3m4n5o6p7q
+Authorization: Bearer {{jwtToken}}
+
+### --- Travessia multi-hop (paths) ---
+
+### All nodes reachable from a given node (no "to", default maxDepth=3)
+GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes/0aba4e07-e3ee-4b50-abd2-dd1f6a32e834/paths
+Authorization: Bearer {{jwtToken}}
+
+### Paths between two specific nodes, up to 4 hops
+GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes/0aba4e07-e3ee-4b50-abd2-dd1f6a32e834/paths?to=node-cebolinha&maxDepth=4
+Authorization: Bearer {{jwtToken}}
+
+### Paths filtered by relation and direction (only "combines_with" edges, outgoing)
+GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes/0aba4e07-e3ee-4b50-abd2-dd1f6a32e834/paths?relation=combines_with&direction=outgoing
+Authorization: Bearer {{jwtToken}}
+
+### maxDepth above the allowed range gets clamped to 6 (no error)
+GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes/0aba4e07-e3ee-4b50-abd2-dd1f6a32e834/paths?maxDepth=99
+Authorization: Bearer {{jwtToken}}
+
+### "to" node that doesn't exist in this graph (expect 404)
+GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes/0aba4e07-e3ee-4b50-abd2-dd1f6a32e834/paths?to=00000000-0000-0000-0000-000000000000
+Authorization: Bearer {{jwtToken}}
+
+### --- Mais casos de uso ---
+
+### Create node with client-supplied id
+POST {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "id": "node-cebolinha",
+  "type": "ingredient",
+  "label": "Cebolinha",
+  "properties": {
+    "origin": "América do Sul"
+  }
+}
+
+### Build a small graph: third node + second edge (Alho -[substitui]-> Cebolinha)
+POST {{baseUrlGraph}}/v1/graphs/{{graphId}}/edges
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "from_node_id": "0aba4e07-e3ee-4b50-abd2-dd1f6a32e834",
+  "to_node_id": "node-cebolinha",
+  "relation": "substitui",
+  "properties": {
+    "context": "quando alho não está disponível"
+  }
+}
+
+### List neighbors after multiple edges (should include Cebola + Cebolinha, each with sua relation)
+GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes/0aba4e07-e3ee-4b50-abd2-dd1f6a32e834/neighbors
+Authorization: Bearer {{jwtToken}}
+
+### Node from a RAG-ingested document (source_document_id linka de volta ao rag-worker)
+POST {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "type": "concept",
+  "label": "Culinária mediterrânea",
+  "source_document_id": "doc-alho-001"
+}
+
+### List nodes by type "concept"
+GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes?type=concept
+Authorization: Bearer {{jwtToken}}
+
+### --- Collaborators (graph_access: owner/editor/viewer) ---
+
+### Grant/update a collaborator's role (upsert, owner-only, requires graph:write)
+PUT {{baseUrlGraph}}/v1/graphs/{{graphId}}/access/00000000-0000-0000-0000-00000000userB
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "role": "editor"
+}
+
+### List collaborators of the graph (any role, viewer+, requires graph:read)
+GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/access
+Authorization: Bearer {{jwtToken}}
+
+### Remove a collaborator's access (owner-only when it's someone else, requires graph:write)
+DELETE {{baseUrlGraph}}/v1/graphs/{{graphId}}/access/00000000-0000-0000-0000-00000000userB
+Authorization: Bearer {{jwtToken}}
+
+### Leave a graph yourself (self-removal, only requires graph:read, no owner check)
+DELETE {{baseUrlGraph}}/v1/graphs/{{graphId}}/access/00000000-0000-0000-0000-00000000userA
+Authorization: Bearer {{jwtToken}}
+
+### Grant/revoke access to someone else as a non-owner (expect 403)
+PUT {{baseUrlGraph}}/v1/graphs/{{graphId}}/access/00000000-0000-0000-0000-00000000userB
+Content-Type: application/json
+Authorization: Bearer token-de-usuario-editor-ou-viewer-no-grafo
+
+{
+  "role": "viewer"
+}
+
+### Downgrading or removing the sole owner of the graph (expect 409, "Graph must have at least one owner")
+PUT {{baseUrlGraph}}/v1/graphs/{{graphId}}/access/00000000-0000-0000-0000-00000000userA
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "role": "viewer"
+}
+
+### --- Casos de erro ---
+
+### Missing auth token on a protected route (expect 401)
+POST {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes
+Content-Type: application/json
+
+{
+  "type": "ingredient",
+  "label": "Sal"
+}
+
+### Invalid/expired token (expect 401)
+GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes?type=ingredient
+Authorization: Bearer token-invalido
+
+### Create node without required field "label" (expect 400, ValidationError)
+POST {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "type": "ingredient"
+}
+
+### List nodes without required "type" query param (expect 400)
+GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes
+Authorization: Bearer {{jwtToken}}
+
+### Get a node that doesn't exist (expect 404)
+GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes/00000000-0000-0000-0000-000000000000
+Authorization: Bearer {{jwtToken}}
+
+### Create edge pointing to a node that doesn't exist (expect 400, ValidationError)
+POST {{baseUrlGraph}}/v1/graphs/{{graphId}}/edges
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "from_node_id": "1a2b3c4d-5e6f-7g8h-9i0j-1k2l3m4n5o6p",
+  "to_node_id": "00000000-0000-0000-0000-000000000000",
+  "relation": "related_to"
+}
+
+### Neighbors of a node with no relations (expect empty list)
+GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes/node-cebolinha/neighbors
+Authorization: Bearer {{jwtToken}}
+
+### Relations between two nodes that aren't directly connected (expect empty/none)
+GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes/node-cebolinha/relations?to=00000000-0000-0000-0000-000000000000
+Authorization: Bearer {{jwtToken}}
+
+### Request to a graph id that doesn't exist at all (expect 404)
+GET {{baseUrlGraph}}/v1/graphs/grafo-que-nao-existe/nodes?type=ingredient
+Authorization: Bearer {{jwtToken}}
+
+### Request to a graph that exists but you have no access to (expect 403)
+### Use um @graphId real que pertença a outro usuário (crie um grafo com outro jwtToken/sub)
+GET {{baseUrlGraph}}/v1/graphs/{{graphId}}/nodes?type=ingredient
+Authorization: Bearer token-de-usuario-sem-acesso-a-esse-grafo
+
+### Unknown route on graph worker (expect 404)
+GET {{baseUrlGraph}}/v1/unknown
+
+### ============================================
+### GRAPHRAG WORKER (Q&A híbrido: RAG + Graph)
+### ============================================
+
+### Health check (reporta quais dos 3 bindings - rag/graph/ai - estão configurados)
+GET {{baseUrlGraphRAG}}/health
+
+### Hybrid Q&A over the "ingredients" graph (entities from api-worker's recommendation graph, ADR 0016)
+POST {{baseUrlGraphRAG}}/v1/graphrag/query
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "question": "Com que ingredientes o alho combina bem?",
+  "graphId": "ingredients",
+  "topK": 5,
+  "maxDepth": 2
+}
+
+### Hybrid Q&A over the default "rag-documents" graph (entities enriched automatically from /ingest, ADR 0016)
+POST {{baseUrlGraphRAG}}/v1/graphrag/query
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "question": "Como o alho é usado na culinária mediterrânea?"
+}
+
+### Question with no entities found in the graph (expect 200, graphContext empty, answer based only on vector context)
+POST {{baseUrlGraphRAG}}/v1/graphrag/query
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "question": "Qual a capital da França?"
+}
+
+### Missing/empty "question" field (expect 400, ValidationError)
+POST {{baseUrlGraphRAG}}/v1/graphrag/query
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "graphId": "ingredients"
+}
+
+### Query without a token (expect 401)
+POST {{baseUrlGraphRAG}}/v1/graphrag/query
+Content-Type: application/json
+
+{
+  "question": "Com que ingredientes o alho combina bem?"
+}
+
+### Query with a valid token that lacks graphrag:query (e.g. profile User, expect 403)
+POST {{baseUrlGraphRAG}}/v1/graphrag/query
+Content-Type: application/json
+Authorization: Bearer token-de-usuario-sem-permissao-graphrag-query
+
+{
+  "question": "Com que ingredientes o alho combina bem?"
+}
+
+### ============================================
+### NOTES
+### ============================================
+
+### Para usar:
+### 1. Instale a extensão "REST Client" no VS Code (humao.rest-client)
+### 2. Copie o JWT token retornado pelo /login para a variável @jwtToken acima
+### 3. Clique em "Send Request" acima de cada requisição
+### 4. Ou use Ctrl+Alt+R (Windows/Linux) ou Cmd+Alt+R (Mac)
+
+### Exemplo de resposta de login:
+### {
+###   "access_token": "eyJhbGc...",
+###   "token_type": "Bearer",
+###   "expires_in": 3600,
+###   "permissions": ["api:access", "rag:query"],
+###   "profiles": ["User"]
+### }

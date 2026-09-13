@@ -21,6 +21,9 @@ module "d1" {
   account_id            = var.account_id
   name                  = coalesce(each.value.name, "${var.environment}-${each.key}")
   primary_location_hint = each.value.primary_location_hint
+  run_migrations        = coalesce(each.value.run_migrations, false)
+  migrations            = coalesce(each.value.migrations, [])
+  cloudflare_api_token  = var.cloudflare_api_token
 }
 
 module "queues" {
@@ -44,5 +47,6 @@ module "worker" {
   script_path        = local.worker_script_paths[each.key]
   compatibility_date = each.value.compatibility_date
   bindings           = local.worker_bindings[each.key]
-  routes             = each.value.routes
+  subdomain_enabled  = coalesce(each.value.subdomain_enabled, true)
+  previews_enabled   = coalesce(each.value.previews_enabled, false)
 }
