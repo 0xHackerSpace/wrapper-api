@@ -1,3 +1,6 @@
+// terraform/workers/ai/src/index.mjs
+import { WorkerEntrypoint } from "cloudflare:workers";
+
 // terraform/workers/ai/src/lib/response.mjs
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -213,8 +216,8 @@ async function requirePermission(request, env, permission) {
 }
 
 // terraform/workers/ai/src/index.mjs
-var index_default = {
-  async fetch(request, env, ctx) {
+var index_default = class extends WorkerEntrypoint {
+  async fetch(request) {
     const url = new URL(request.url);
     const { pathname } = url;
     try {
@@ -224,7 +227,7 @@ var index_default = {
         return handleListModels();
       }
       if (pathname === "/v1/chat/completions" && request.method === "POST") {
-        return await handleChatCompletion(request, env);
+        return await handleChatCompletion(request, this.env);
       }
       return notFound("Endpoint not found");
     } catch (error2) {
@@ -234,6 +237,18 @@ var index_default = {
       console.error("Error:", error2);
       return internalError(error2.message);
     }
+  }
+  // RPC entrypoint for other workers via Service Bindings. No requirePermission here:
+  // Service Bindings are only reachable from within the same Cloudflare account, so
+  // RBAC (ai:chat) enforcement stays exclusive to the HTTP path above.
+  async chat(messages, options = {}) {
+    const validated = validateChatCompletionRequest({ messages, ...options });
+    return chatCompletion(this.env.AI, validated.messages, {
+      model: validated.model,
+      temperature: validated.temperature,
+      max_tokens: validated.max_tokens,
+      top_p: validated.top_p
+    });
   }
 };
 function handleHealth() {

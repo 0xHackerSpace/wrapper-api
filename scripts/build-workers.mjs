@@ -8,6 +8,7 @@ const workers = [
   { name: "ai", entry: "terraform/workers/ai/src/index.mjs", output: "terraform/workers/ai/dist/index.mjs" },
   { name: "rag", entry: "terraform/workers/rag/index.mjs", output: "terraform/workers/rag/dist/index.mjs" },
   { name: "graph", entry: "terraform/workers/graph/src/index.mjs", output: "terraform/workers/graph/dist/index.mjs" },
+  { name: "graphrag", entry: "terraform/workers/graphrag/src/index.mjs", output: "terraform/workers/graphrag/dist/index.mjs" },
 ];
 
 for (const worker of workers) {
@@ -20,6 +21,7 @@ for (const worker of workers) {
     outfile: worker.output,
     platform: "browser",
     target: "es2022",
+    external: ["cloudflare:workers"],
   });
   console.log(`✓ Built ${worker.name} worker`);
 }

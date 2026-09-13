@@ -1,9 +1,10 @@
+import { WorkerEntrypoint } from "cloudflare:workers";
 import { json, badRequest, notFound, internalError } from "./lib/response.mjs";
 import { chatCompletion, getAvailableModels, validateChatCompletionRequest, ValidationError } from "./lib/ai.mjs";
 import { requirePermission, AuthError } from "./lib/auth.mjs";
 
-export default {
-  async fetch(request, env, ctx) {
+export default class extends WorkerEntrypoint {
+  async fetch(request) {
     const url = new URL(request.url);
     const { pathname } = url;
 
@@ -16,7 +17,7 @@ export default {
       }
 
       if (pathname === "/v1/chat/completions" && request.method === "POST") {
-        return await handleChatCompletion(request, env);
+        return await handleChatCompletion(request, this.env);
       }
 
       return notFound("Endpoint not found");
@@ -27,8 +28,22 @@ export default {
       console.error("Error:", error);
       return internalError(error.message);
     }
-  },
-};
+  }
+
+  // RPC entrypoint for other workers via Service Bindings. No requirePermission here:
+  // Service Bindings are only reachable from within the same Cloudflare account, so
+  // RBAC (ai:chat) enforcement stays exclusive to the HTTP path above.
+  async chat(messages, options = {}) {
+    const validated = validateChatCompletionRequest({ messages, ...options });
+
+    return chatCompletion(this.env.AI, validated.messages, {
+      model: validated.model,
+      temperature: validated.temperature,
+      max_tokens: validated.max_tokens,
+      top_p: validated.top_p,
+    });
+  }
+}
 
 function handleHealth() {
   return json({

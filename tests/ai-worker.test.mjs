@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import worker from "../terraform/workers/ai/src/index.mjs";
+import AiWorker from "../terraform/workers/ai/src/index.mjs";
 import { generateToken } from "../terraform/workers/ai/src/lib/jwt.mjs";
 
 const JWT_SECRET = "test-secret";
@@ -20,15 +20,17 @@ function harness(overrides = {}) {
     ...overrides,
   };
 
+  const worker = new AiWorker({}, env);
+
   const call = async (path, init) => {
-    const response = await worker.fetch(new Request(`https://ai.test${path}`, init), env, {});
+    const response = await worker.fetch(new Request(`https://ai.test${path}`, init));
     return { status: response.status, body: await response.json() };
   };
   const get = (path, headers = {}) => call(path, { method: "GET", headers });
   const post = (path, body, headers = {}) =>
     call(path, { method: "POST", body: JSON.stringify(body), headers: { "content-type": "application/json", ...headers } });
 
-  return { env, runCalls, call, get, post };
+  return { env, worker, runCalls, call, get, post };
 }
 
 async function authHeader(payload = { sub: "user-1", permissions: ["ai:chat"] }) {
@@ -162,6 +164,26 @@ test("a system message is merged into the first user message before reaching Wor
   assert.deepEqual(sentRoles, ["user"], "no 'system' role should ever reach Workers AI");
   assert.match(runCalls[0].input.messages[0].content, /You are a helpful assistant/);
   assert.match(runCalls[0].input.messages[0].content, /hello/);
+});
+
+test("chat() RPC method returns a chat completion without going through HTTP", async () => {
+  // Simulates how another worker calls this one over a Service Binding (RPC),
+  // bypassing fetch()/requirePermission entirely.
+  const { worker, runCalls } = harness();
+
+  const result = await worker.chat([{ role: "user", content: "hello" }]);
+
+  assert.equal(result.object, "chat.completion");
+  assert.equal(result.choices[0].message.role, "assistant");
+  assert.equal(result.choices[0].message.content, "mocked response");
+  assert.equal(runCalls.length, 1);
+});
+
+test("chat() RPC method validates messages the same way as the HTTP endpoint", async () => {
+  const { worker } = harness();
+
+  await assert.rejects(() => worker.chat([]), /messages array cannot be empty/);
+  await assert.rejects(() => worker.chat([{ role: "bogus", content: "hi" }]), /message role must be/);
 });
 
 test("unknown endpoints return 404", async () => {
