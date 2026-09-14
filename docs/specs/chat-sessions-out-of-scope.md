@@ -2,13 +2,11 @@
 
 Complementa [chat-sessions.md](chat-sessions.md). Lista o que foi deliberadamente adiado durante a especificação da feature de sessões de chat, e por quê — para que uma revisão futura não precise re-descobrir o raciocínio do zero.
 
-**Atualização**: compartilhamento, paginação/busca e renomear manualmente foram implementados — ver [chat-sessions-sharing-and-pagination.md](chat-sessions-sharing-and-pagination.md). Só a exposição via RPC continua fora de escopo (seção abaixo).
+**Atualização**: compartilhamento, paginação/busca, renomear manualmente e streaming foram implementados — ver [chat-sessions-sharing-and-pagination.md](chat-sessions-sharing-and-pagination.md) e [ADR 0021](../decisions/0021-chat-streaming.md). Só a exposição via RPC continua fora de escopo (seção abaixo).
 
 ## Streaming
 
-`/v1/chat/completions` e a nova `POST /v1/sessions/:id/messages` não suportam streaming (SSE ou chunked). Já era um "próximo passo" listado na ADR 0008 (AI Worker OpenAI compatibility) antes desta spec existir — sessões não mudam esse gap, só herdam a mesma limitação do endpoint stateless.
-
-**Quando revisitar**: se streaming for implementado para `/v1/chat/completions`, a mesma mudança pode ser estendida a `/v1/sessions/:id/messages` sem alterar o schema.
+**Implementado** — ver [ADR 0021](../decisions/0021-chat-streaming.md) e a spec [chat-streaming.md](chat-streaming.md). `/v1/chat/completions` e `POST /v1/sessions/:id/messages` agora aceitam `stream: true` no corpo e retornam SSE (`chat.completion.chunk` estilo OpenAI); ausência do campo (ou `false`) mantém o comportamento anterior sem mudança.
 
 ## Exposição via RPC (Service Binding)
 
