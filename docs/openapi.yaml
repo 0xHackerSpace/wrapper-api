@@ -1,0 +1,2374 @@
+openapi: 3.1.0
+info:
+  title: Wrapper API
+  version: "1.0.0"
+  description: |
+    Documento OpenAPI unico cobrindo a superficie HTTP real dos 6 Cloudflare Workers do
+    projeto (`auth`, `api`, `ai`, `graph`, `rag`, `graphrag`). Mantido a mao, alinhado ao
+    codigo em `terraform/workers/{worker}/{src/,}index.mjs` -- ver `docs/specs/openapi-documentation.md`
+    para a spec que motivou este documento.
+
+    ## Fora de escopo: RPC via Service Binding
+
+    `ai-worker` (`chat()`), `graph-worker` (`upsertNode`, `updateNode`, `deleteNode`,
+    `createEdge`, `getNeighbors`, `findPaths`, `findNodeByLabel`) e `rag-worker` (`query()`)
+    tambem sao `WorkerEntrypoint` e expoem metodos RPC adicionais, alcancaveis apenas via
+    Service Binding entre Workers da mesma conta Cloudflare -- nunca via HTTP. OpenAPI e um
+    formato de descricao de API HTTP, portanto esses metodos RPC NAO aparecem em `paths`
+    abaixo. Ver ADR 0015 (Service Bindings + RPC) e ADR 0016 (grafos por domínio e
+    enriquecimento via RAG) para o contrato desses metodos.
+
+    ## Rotas duplicadas entre workers (`/health`, `/`, `/v1`)
+
+    `GET /health` existe, com o mesmo path literal, nos 6 workers; `GET /` existe em
+    `auth`, `api`, `ai` e `graph`; `GET /v1` existe em `ai` e `graph` como alias do mesmo
+    handler de `GET /`. OpenAPI nao permite duas operacoes distintas sob a mesma chave
+    `path`+metodo no mesmo documento, entao essas rotas aparecem como uma unica operacao
+    cada, com `tags` listando todos os workers que a implementam e um `examples` nomeado
+    por worker mostrando o corpo real retornado por cada um.
+
+    ## Erros: dois formatos, sem unificar
+
+    - `auth-worker`, `api-worker` e `rag-worker` retornam `{ "error": "mensagem" }` (string
+      plana) -- ver `AuthErrorResponse`.
+    - `ai-worker`, `graph-worker` e `graphrag-worker` retornam
+      `{ "error": { "message": "...", "type": "invalid_request_error" } }` -- ver
+      `ErrorResponse`.
+
+    Essa classificacao foi verificada linha a linha em cada `lib/response.mjs` /
+    `lib/auth.mjs` de cada worker (nao e a mesma divisao 1-vs-5 as vezes assumida
+    informalmente; `api` e `rag` de fato usam o formato plano, igual a `auth`).
+servers:
+  - url: https://dev-api.0xhackerspace.workers.dev
+    description: api-worker (dev)
+  - url: https://dev-auth.0xhackerspace.workers.dev
+    description: auth-worker (dev)
+  - url: https://dev-ai.0xhackerspace.workers.dev
+    description: ai-worker (dev)
+  - url: https://dev-graph.0xhackerspace.workers.dev
+    description: graph-worker (dev)
+  - url: https://dev-rag.0xhackerspace.workers.dev
+    description: rag-worker (dev)
+  - url: https://dev-graphrag.0xhackerspace.workers.dev
+    description: graphrag-worker (dev)
+tags:
+  - name: auth
+    description: auth-worker -- JWT, signup/login/refresh, estatisticas de usuarios.
+  - name: api
+    description: api-worker -- CRUD de ingredientes e recomendacoes via graph-worker.
+  - name: ai
+    description: ai-worker -- chat completions compativeis com OpenAI, sessoes de chat persistentes.
+  - name: graph
+    description: graph-worker -- grafo de conhecimento (grafos, nodes, edges, ACL).
+  - name: rag
+    description: rag-worker -- ingestao e busca semantica (Vectorize + BGE embeddings).
+  - name: graphrag
+    description: graphrag-worker -- Q&A hibrido (RAG + travessia do grafo).
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    AuthErrorResponse:
+      type: object
+      description: Formato de erro usado por auth-worker, api-worker e rag-worker.
+      properties:
+        error:
+          type: string
+      required: [error]
+    ErrorResponse:
+      type: object
+      description: Formato de erro usado por ai-worker, graph-worker e graphrag-worker.
+      properties:
+        error:
+          type: object
+          properties:
+            message:
+              type: string
+            type:
+              type: string
+              example: invalid_request_error
+          required: [message, type]
+      required: [error]
+    Ingredient:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        nome:
+          type: string
+        slug:
+          type: string
+        type:
+          type: string
+        reference:
+          type: string
+          nullable: true
+        url:
+          type: string
+          nullable: true
+        permissions:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+        updated_at:
+          type: string
+      required: [id, nome, slug, type]
+    IngredientInput:
+      type: object
+      properties:
+        nome:
+          type: string
+        slug:
+          type: string
+        type:
+          type: string
+        reference:
+          type: string
+        url:
+          type: string
+        permissions:
+          type: string
+      required: [nome, slug, type]
+    IngredientUpdateInput:
+      type: object
+      description: Todos os campos sao opcionais; apenas os enviados sao atualizados.
+      properties:
+        nome:
+          type: string
+        slug:
+          type: string
+        type:
+          type: string
+        reference:
+          type: string
+        url:
+          type: string
+        permissions:
+          type: string
+    ChatSession:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+        title:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+        updated_at:
+          type: string
+        role:
+          type: string
+          enum: [owner, editor, viewer]
+      required: [id, user_id, created_at, updated_at]
+    ChatMessage:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        session_id:
+          type: string
+          format: uuid
+        role:
+          type: string
+          enum: [user, assistant]
+        content:
+          type: string
+        created_at:
+          type: string
+      required: [id, session_id, role, content, created_at]
+    ChatCompletionMessageInput:
+      type: object
+      properties:
+        role:
+          type: string
+          enum: [system, user, assistant]
+        content:
+          type: string
+      required: [role, content]
+    AccessEntry:
+      type: object
+      description: Linha de ACL (chat_access ou graph_access), papel owner/editor/viewer.
+      properties:
+        user_id:
+          type: string
+        role:
+          type: string
+          enum: [owner, editor, viewer]
+        created_at:
+          type: string
+      required: [user_id, role, created_at]
+    AccessRoleInput:
+      type: object
+      properties:
+        role:
+          type: string
+          enum: [owner, editor, viewer]
+      required: [role]
+    Graph:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        created_by:
+          type: string
+        created_at:
+          type: string
+        role:
+          type: string
+          enum: [owner, editor, viewer]
+      required: [id, name, created_by, created_at]
+    Node:
+      type: object
+      properties:
+        id:
+          type: string
+        graph_id:
+          type: string
+        type:
+          type: string
+        label:
+          type: string
+        properties:
+          type: object
+          nullable: true
+        source_document_id:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+        updated_at:
+          type: string
+      required: [id, graph_id, type, label, created_at, updated_at]
+    NodeInput:
+      type: object
+      properties:
+        id:
+          type: string
+          description: ID opcional fornecido pelo cliente; gerado (UUID) se omitido.
+        type:
+          type: string
+        label:
+          type: string
+        properties:
+          type: object
+        source_document_id:
+          type: string
+      required: [type, label]
+    NodeUpdateInput:
+      type: object
+      description: Atualiza apenas label e/ou properties.
+      properties:
+        label:
+          type: string
+        properties:
+          type: object
+    Edge:
+      type: object
+      properties:
+        id:
+          type: string
+        from_node_id:
+          type: string
+        to_node_id:
+          type: string
+        relation:
+          type: string
+        properties:
+          type: object
+          nullable: true
+        created_at:
+          type: string
+        updated_at:
+          type: string
+      required: [id, from_node_id, to_node_id, relation, created_at, updated_at]
+    EdgeInput:
+      type: object
+      properties:
+        id:
+          type: string
+        from_node_id:
+          type: string
+        to_node_id:
+          type: string
+        relation:
+          type: string
+        properties:
+          type: object
+      required: [from_node_id, to_node_id, relation]
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      summary: Liveness check
+      description: |
+        Rota publica, sem autenticacao. Existe com o mesmo path literal nos 6 workers
+        (`auth`, `api`, `ai`, `graph`, `rag`, `graphrag`); cada um retorna um corpo
+        proprio -- ver `examples` por worker abaixo.
+      tags: [auth, api, ai, graph, rag, graphrag]
+      responses:
+        "200":
+          description: Worker saudavel. O corpo varia por worker (ver examples).
+          content:
+            application/json:
+              schema:
+                type: object
+              examples:
+                auth:
+                  summary: auth-worker
+                  value: { status: ok, service: auth, db: true }
+                api:
+                  summary: api-worker
+                  value: { service: api, status: ok, environment: dev, authentication: "JWT Bearer Token" }
+                ai:
+                  summary: ai-worker
+                  value: { status: ok, service: ai, version: "1.0.0" }
+                graph:
+                  summary: graph-worker
+                  value: { service: graph, status: ok, environment: dev }
+                rag:
+                  summary: rag-worker
+                  value:
+                    service: rag
+                    status: ok
+                    environment: dev
+                    models: { embedding: "@cf/baai/bge-base-en-v1.5", generation: "@cf/mistral/mistral-7b-instruct-v0.1" }
+                    retrieval: { chunkSize: 1200, chunkOverlap: 150, topK: 5 }
+                    bindings: { ai: true, vectorize: true, documents: true }
+                    authenticated: false
+                    timestamp: "2026-09-14T12:00:00.000Z"
+                graphrag:
+                  summary: graphrag-worker
+                  value:
+                    service: graphrag
+                    status: ok
+                    environment: dev
+                    bindings: { rag: true, graph: true, ai: true }
+  /:
+    get:
+      operationId: getInfo
+      summary: Informacoes do servico
+      description: |
+        Rota publica, sem autenticacao. Existe com o mesmo path literal em `auth`,
+        `api`, `ai` e `graph` (em `ai` e `graph` tambem acessivel via `GET /v1`, ver
+        abaixo); cada um retorna um corpo proprio -- ver `examples` por worker.
+      tags: [auth, api, ai, graph]
+      responses:
+        "200":
+          description: Metadados do servico (versao, endpoints, autenticacao). O corpo varia por worker.
+          content:
+            application/json:
+              schema:
+                type: object
+              examples:
+                auth:
+                  summary: auth-worker
+                  value:
+                    service: auth
+                    version: "1.0.0"
+                    database: D1
+                    endpoints:
+                      health: "GET /health"
+                      signup: "POST /signup"
+                      login: "POST /login"
+                      verify: "POST /verify"
+                      refresh: "POST /refresh"
+                      stats: "GET /stats (requires auth + auth:stats permission)"
+                    authentication: "JWT (Bearer token)"
+                api:
+                  summary: api-worker
+                  value:
+                    service: api
+                    version: "1.0.0"
+                    environment: dev
+                    endpoints:
+                      health: "GET /health"
+                      info: "GET /"
+                      protected: "GET /protected (requires auth)"
+                      profile: "GET /profile (requires auth)"
+                      recommendations: "GET /ingredients/:id/recommendations?relation=&indirect=&maxDepth= (requires auth, ingredient:read)"
+                    authentication:
+                      type: "JWT Bearer Token"
+                      header: "Authorization: Bearer {token}"
+                      token_source: "https://dev-auth.0xhackerspace.workers.dev/login"
+                ai:
+                  summary: ai-worker
+                  value:
+                    service: ai
+                    version: "1.0.0"
+                    description: "OpenAI-compatible AI API powered by Cloudflare Workers AI"
+                    endpoints:
+                      health: "GET /health"
+                      info: "GET /"
+                      models: "GET /v1/models"
+                      chat_completions: "POST /v1/chat/completions (requires auth + ai:chat permission; body { stream: true } returns text/event-stream chat.completion.chunk events instead of a single JSON response)"
+                    documentation: "https://platform.openai.com/docs/api-reference"
+                graph:
+                  summary: graph-worker
+                  value:
+                    service: graph
+                    version: "1.0.0"
+                    description: "Knowledge graph API: isolated graphs of entities (nodes) and relations (edges) extracted from documents"
+                    environment: dev
+                    endpoints:
+                      health: "GET /health"
+                      info: "GET /v1"
+                      create_graph: "POST /v1/graphs (requires auth, creator becomes owner)"
+                      list_graphs: "GET /v1/graphs (requires auth, lists graphs you have access to)"
+                    authentication:
+                      type: "JWT Bearer Token"
+                      header: "Authorization: Bearer {token}"
+  /v1:
+    get:
+      operationId: getInfoV1Alias
+      summary: Informacoes do servico (alias de GET /)
+      description: |
+        Alias de `GET /` em `ai-worker` e `graph-worker` (mesmo handler, mesmo corpo).
+        Rota publica, sem autenticacao.
+      tags: [ai, graph]
+      responses:
+        "200":
+          description: Mesmo corpo de `GET /` para o worker correspondente.
+          content:
+            application/json:
+              schema:
+                type: object
+  /signup:
+    post:
+      operationId: postSignup
+      summary: Cria um novo usuario
+      description: Rota publica. Cria um usuario ativo na base `dev-auth`.
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                username:
+                  type: string
+                  minLength: 3
+                password:
+                  type: string
+                  minLength: 8
+                email:
+                  type: string
+                firstName:
+                  type: string
+                lastName:
+                  type: string
+              required: [username, password, email]
+            example:
+              username: ianoliv
+              email: ian.oliv@outlook.com
+              password: password123
+      responses:
+        "201":
+          description: Usuario criado.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user:
+                    type: object
+                    properties:
+                      id: { type: string }
+                      username: { type: string }
+                      email: { type: string }
+                      firstName: { type: string, nullable: true }
+                      lastName: { type: string, nullable: true }
+        "400":
+          description: Campos obrigatorios ausentes/invalidos, ou username ja existente.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthErrorResponse"
+              example:
+                error: "username already exists"
+  /login:
+    post:
+      operationId: postLogin
+      summary: Autentica um usuario e emite tokens
+      description: Rota publica. Retorna access token (1h) e refresh token (7 dias).
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                username: { type: string }
+                password: { type: string }
+              required: [username, password]
+            example:
+              username: ianoliv
+              password: password123
+      responses:
+        "200":
+          description: Login bem-sucedido.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { type: string }
+                  refresh_token: { type: string }
+                  token_type: { type: string, example: Bearer }
+                  expires_in: { type: integer, example: 3600 }
+                  user:
+                    type: object
+                    properties:
+                      id: { type: string }
+                      username: { type: string }
+                      email: { type: string, nullable: true }
+                  permissions:
+                    type: array
+                    items: { type: string }
+                    example: ["api:access", "rag:query"]
+                  profiles:
+                    type: array
+                    items: { type: string }
+                    example: ["User"]
+        "401":
+          description: Credenciais invalidas ou conta inativa.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthErrorResponse"
+              example:
+                error: "Invalid credentials"
+  /verify:
+    post:
+      operationId: postVerify
+      summary: Verifica um token JWT
+      description: Rota publica; o token e enviado no corpo (nao no header Authorization).
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                token: { type: string }
+              required: [token]
+      responses:
+        "200":
+          description: Token valido.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  valid: { type: boolean, example: true }
+                  payload: { type: object }
+                  user:
+                    type: object
+                    properties:
+                      username: { type: string }
+        "401":
+          description: Token invalido ou expirado.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthErrorResponse"
+              example:
+                error: "Invalid or expired token"
+  /refresh:
+    post:
+      operationId: postRefresh
+      summary: Emite um novo access token a partir de um refresh token
+      description: Rota publica; o refresh token e enviado no corpo.
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                refresh_token: { type: string }
+              required: [refresh_token]
+      responses:
+        "200":
+          description: Novo access token emitido.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { type: string }
+                  token_type: { type: string, example: Bearer }
+                  expires_in: { type: integer, example: 3600 }
+        "401":
+          description: Refresh token invalido, expirado, ou nao e do tipo "refresh".
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthErrorResponse"
+              example:
+                error: "Invalid or expired refresh token"
+  /stats:
+    get:
+      operationId: getStats
+      summary: Estatisticas agregadas de usuarios
+      description: Requer JWT + permission `auth:stats` (tipicamente perfil Admin).
+      tags: [auth]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Estatisticas agregadas.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total_users: { type: integer }
+                  active_users: { type: integer }
+                  database: { type: string, example: D1 }
+        "401":
+          description: Sem token de autenticacao.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthErrorResponse"
+              example:
+                error: "Missing authorization token"
+        "403":
+          description: Token valido mas sem a permission `auth:stats`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthErrorResponse"
+              example:
+                error: "Missing required permission: auth:stats"
+  /protected:
+    get:
+      operationId: getProtected
+      summary: Recurso protegido de demonstracao
+      description: Requer JWT + permission `api:access`. Faz eco de informacoes do token.
+      tags: [api]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Acesso concedido.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string }
+                  user:
+                    type: object
+                    properties:
+                      sub: { type: string }
+                      username: { type: string }
+                  token_info:
+                    type: object
+                    properties:
+                      issued_at: { type: string }
+                      expires_at: { type: string }
+                      type: { type: string }
+        "401":
+          description: Sem token de autenticacao.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthErrorResponse"
+              example:
+                error: "Missing authorization token"
+  /profile:
+    get:
+      operationId: getProfile
+      summary: Perfil derivado do token JWT
+      description: Requer JWT + permission `api:access`.
+      tags: [api]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Perfil do usuario autenticado.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  profile:
+                    type: object
+                    properties:
+                      username: { type: string }
+                      subject: { type: string }
+                      authenticated: { type: boolean }
+                      token_type: { type: string }
+                      issued_at: { type: string }
+                      expires_at: { type: string }
+        "401":
+          description: Sem token de autenticacao.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthErrorResponse"
+  /ingredients:
+    get:
+      operationId: getIngredients
+      summary: Lista todos os ingredientes
+      description: Requer JWT + permission `ingredient:read`.
+      tags: [api]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Lista de ingredientes.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Ingredient"
+                  count: { type: integer }
+        "401":
+          description: Sem token de autenticacao.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthErrorResponse"
+        "403":
+          description: Token valido mas sem a permission `ingredient:read`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthErrorResponse"
+    post:
+      operationId: postIngredients
+      summary: Cria um ingrediente
+      description: Requer JWT + permission `ingredient:create`.
+      tags: [api]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IngredientInput"
+            examples:
+              full:
+                summary: Com todos os campos opcionais
+                value:
+                  nome: Alho
+                  slug: alho
+                  type: tempero
+                  reference: "https://en.wikipedia.org/wiki/Garlic"
+                  url: "https://example.com/alho"
+                  permissions: public
+              minimal:
+                summary: Apenas campos obrigatorios
+                value:
+                  nome: Cebola
+                  slug: cebola
+                  type: vegetal
+      responses:
+        "201":
+          description: Ingrediente criado.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  data:
+                    $ref: "#/components/schemas/Ingredient"
+        "400":
+          description: Campos obrigatorios ausentes (nome, slug, type).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthErrorResponse"
+              example:
+                error: "Missing required fields: nome, slug, type"
+        "409":
+          description: Ja existe um ingrediente com esse slug.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthErrorResponse"
+              example:
+                error: "Ingredient with this slug already exists"
+  /ingredients/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: getIngredientById
+      summary: Busca um ingrediente por ID
+      description: Requer JWT + permission `ingredient:read`.
+      tags: [api]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Ingrediente encontrado.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  data:
+                    $ref: "#/components/schemas/Ingredient"
+        "404":
+          description: Ingrediente nao encontrado.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthErrorResponse"
+              example:
+                error: "Ingredient not found"
+    put:
+      operationId: putIngredientById
+      summary: Atualiza um ingrediente
+      description: Requer JWT + permission `ingredient:update`.
+      tags: [api]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IngredientUpdateInput"
+            example:
+              nome: "Alho fresco"
+              reference: "https://pt.wikipedia.org/wiki/Alho"
+      responses:
+        "200":
+          description: Ingrediente atualizado.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  data:
+                    $ref: "#/components/schemas/Ingredient"
+        "404":
+          description: Ingrediente nao encontrado.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthErrorResponse"
+              example:
+                error: "Ingredient not found"
+        "409":
+          description: Novo slug ja usado por outro ingrediente.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthErrorResponse"
+    delete:
+      operationId: deleteIngredientById
+      summary: Remove um ingrediente
+      description: Requer JWT + permission `ingredient:delete`.
+      tags: [api]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Ingrediente removido.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  data:
+                    $ref: "#/components/schemas/Ingredient"
+                  message: { type: string, example: "Ingredient deleted successfully" }
+        "404":
+          description: Ingrediente nao encontrado.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthErrorResponse"
+              example:
+                error: "Ingredient not found"
+  /ingredients/{id}/recommendations:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: relation
+        in: query
+        required: false
+        schema:
+          type: string
+        description: Filtra por tipo de relacao (ex. "pairs_well_with").
+      - name: indirect
+        in: query
+        required: false
+        schema:
+          type: boolean
+          default: false
+        description: Quando true, usa travessia multi-hop (findPaths) em vez de vizinhos diretos.
+      - name: maxDepth
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 2
+        description: Profundidade maxima da travessia quando indirect=true.
+    get:
+      operationId: getIngredientRecommendations
+      summary: Recomendacoes de ingredientes via grafo de conhecimento
+      description: |
+        Requer JWT + permission `ingredient:read`. Consome graph-worker via Service
+        Binding (RPC `getNeighbors`/`findPaths`) para montar a lista. Retorna
+        `{ success: true, data: [], count: 0 }` quando o ingrediente ainda nao tem
+        node correspondente no grafo (nao e um erro).
+      tags: [api]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Lista de recomendacoes (diretas ou indiretas).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  mode: { type: string, enum: [direct, indirect] }
+                  data:
+                    type: array
+                    items:
+                      type: object
+                  count: { type: integer }
+        "404":
+          description: Ingrediente nao encontrado.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthErrorResponse"
+              example:
+                error: "Ingredient not found"
+  /v1/models:
+    get:
+      operationId: getV1Models
+      summary: Lista modelos disponiveis
+      description: Rota publica, sem autenticacao. Formato compativel com OpenAI `GET /v1/models`.
+      tags: [ai]
+      responses:
+        "200":
+          description: Lista de modelos.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object: { type: string, example: list }
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        object: { type: string, example: model }
+                        owned_by: { type: string, example: cloudflare }
+                        permission:
+                          type: array
+                          items: {}
+              example:
+                object: list
+                data:
+                  - id: "@cf/meta/llama-2-7b-chat-int8"
+                    object: model
+                    owned_by: cloudflare
+                    permission: []
+                  - id: "@cf/mistral/mistral-7b-instruct-v0.1"
+                    object: model
+                    owned_by: cloudflare
+                    permission: []
+                  - id: "@cf/baai/bge-base-en-v1.5"
+                    object: model
+                    owned_by: cloudflare
+                    permission: []
+  /v1/chat/completions:
+    post:
+      operationId: postV1ChatCompletions
+      summary: Chat completion (compativel com OpenAI)
+      description: |
+        Requer JWT + permission `ai:chat`. Quando `stream: true`, a resposta e
+        `text/event-stream` com eventos `chat.completion.chunk` (formato SSE de streaming
+        da OpenAI) em vez de um unico JSON.
+      tags: [ai]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                messages:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/ChatCompletionMessageInput"
+                model:
+                  type: string
+                  default: "@cf/meta/llama-2-7b-chat-int8"
+                temperature:
+                  type: number
+                  default: 0.7
+                max_tokens:
+                  type: integer
+                  default: 1024
+                top_p:
+                  type: number
+                  default: 1
+                stream:
+                  type: boolean
+                  default: false
+              required: [messages]
+            examples:
+              withSystemMessage:
+                summary: Com instrucao de sistema
+                value:
+                  model: "@cf/mistral/mistral-7b-instruct-v0.1"
+                  messages:
+                    - role: system
+                      content: "Você é um assistente útil e amigável que responde perguntas de forma clara e concisa.me responda apenas em português."
+                    - role: user
+                      content: "qual a capital da França?"
+                  temperature: 0.7
+                  max_tokens: 512
+              minimal:
+                summary: Minimo (sem system message)
+                value:
+                  messages:
+                    - role: user
+                      content: "Explique como fazer uma receita de alho"
+              streaming:
+                summary: Com stream (SSE chat.completion.chunk)
+                value:
+                  messages:
+                    - role: user
+                      content: "Explique como fazer uma receita de alho"
+                  stream: true
+      responses:
+        "200":
+          description: |
+            Chat completion no formato OpenAI, ou (quando `stream: true`) um
+            `text/event-stream` de eventos `chat.completion.chunk` terminado por `data: [DONE]`.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+                  object: { type: string, example: chat.completion }
+                  created: { type: integer }
+                  model: { type: string }
+                  choices:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        index: { type: integer }
+                        message:
+                          type: object
+                          properties:
+                            role: { type: string, example: assistant }
+                            content: { type: string }
+                        finish_reason: { type: string, example: stop }
+                  usage:
+                    type: object
+                    properties:
+                      prompt_tokens: { type: integer }
+                      completion_tokens: { type: integer }
+                      total_tokens: { type: integer }
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  Sequencia de linhas `data: {"id":...,"object":"chat.completion.chunk",...}`,
+                  finalizada por `data: [DONE]`.
+        "400":
+          description: Corpo invalido (messages ausente/vazio, role invalida, etc.).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: { message: "messages is required and must be an array", type: invalid_request_error }
+        "401":
+          description: Sem token de autenticacao.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Token valido mas sem a permission `ai:chat`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/sessions:
+    post:
+      operationId: postV1Sessions
+      summary: Cria uma sessao de chat vazia
+      description: Requer JWT + permission `ai:chat`. O criador vira `owner` da sessao.
+      tags: [ai]
+      security:
+        - bearerAuth: []
+      responses:
+        "201":
+          description: Sessao criada.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string, format: uuid }
+                  title: { type: string, nullable: true, example: null }
+                  created_at: { type: string }
+    get:
+      operationId: getV1Sessions
+      summary: Lista sessoes de chat do usuario autenticado
+      description: |
+        Requer JWT + permission `ai:chat`. Lista sessoes onde o usuario tem qualquer
+        papel em `chat_access` (owner/editor/viewer), ordenadas por `updated_at` desc.
+        Paginacao por cursor opaco (keyset).
+      tags: [ai]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Pagina de sessoes.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object: { type: string, example: list }
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ChatSession"
+                  next_cursor:
+                    type: string
+                    nullable: true
+  /v1/sessions/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getV1SessionById
+      summary: Metadados de uma sessao (sem mensagens)
+      description: |
+        Requer JWT + permission `ai:chat`. Papel minimo na sessao: `viewer`. 404 quando
+        a sessao nao existe OU quando o usuario nao tem `chat_access` a ela (para nao
+        vazar a existencia do id).
+      tags: [ai]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Sessao encontrada.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ChatSession"
+        "404":
+          description: Sessao inexistente ou sem chat_access.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: { message: "Session not found", type: invalid_request_error }
+    patch:
+      operationId: patchV1SessionById
+      summary: Renomeia uma sessao
+      description: "Requer JWT + permission `ai:chat`. Papel minimo na sessao: `editor`."
+      tags: [ai]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title:
+                  type: string
+                  maxLength: 200
+              required: [title]
+            example:
+              title: "Receitas com alho"
+      responses:
+        "200":
+          description: Sessao renomeada.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatSession"
+        "404":
+          description: Sessao inexistente ou sem chat_access.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    delete:
+      operationId: deleteV1SessionById
+      summary: Remove uma sessao
+      description: |
+        Requer JWT + permission `ai:chat`. Papel minimo na sessao: `owner`. Cascateia
+        para `chat_messages` e `chat_access` (ON DELETE CASCADE).
+      tags: [ai]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Sessao removida.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+        "404":
+          description: Sessao inexistente ou sem chat_access.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/sessions/{id}/messages:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      operationId: postV1SessionMessages
+      summary: Envia uma mensagem na sessao
+      description: |
+        Requer JWT + permission `ai:chat`. Papel minimo na sessao: `editor`. Persiste o
+        turno usuario+assistente; o titulo da sessao e preenchido automaticamente no
+        primeiro envio. Quando `stream: true`, a resposta e SSE (`chat.completion.chunk`)
+        e a mensagem do assistant so e persistida apos o streaming terminar com sucesso.
+      tags: [ai]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                content:
+                  type: string
+                model:
+                  type: string
+                stream:
+                  type: boolean
+                  default: false
+              required: [content]
+            examples:
+              default:
+                summary: Envio simples
+                value:
+                  content: "Explique como fazer uma receita de alho"
+                  model: "@cf/mistral/mistral-7b-instruct-v0.1"
+              streaming:
+                summary: Com stream (SSE)
+                value:
+                  content: "Explique como fazer uma receita de alho"
+                  model: "@cf/mistral/mistral-7b-instruct-v0.1"
+                  stream: true
+      responses:
+        "200":
+          description: |
+            Resposta do assistant, ou (quando `stream: true`) `text/event-stream` de
+            eventos `chat.completion.chunk` terminado por `data: [DONE]`.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  session_id: { type: string, format: uuid }
+                  message:
+                    type: object
+                    properties:
+                      role: { type: string, example: assistant }
+                      content: { type: string }
+                  usage:
+                    type: object
+                    properties:
+                      prompt_tokens: { type: integer }
+                      completion_tokens: { type: integer }
+                      total_tokens: { type: integer }
+            text/event-stream:
+              schema:
+                type: string
+        "403":
+          description: |
+            Papel insuficiente na sessao (ex. `viewer` tentando enviar mensagem) --
+            403, nao 404, ja que o usuario ja sabe que a sessao existe.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: { message: "Insufficient role for this session", type: invalid_request_error }
+        "404":
+          description: Sessao inexistente ou sem chat_access.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    get:
+      operationId: getV1SessionMessages
+      summary: Historico de mensagens da sessao, paginado
+      description: |
+        Requer JWT + permission `ai:chat`. Papel minimo na sessao: `viewer`. Ordenado por
+        `created_at` asc. Paginacao por cursor opaco (keyset).
+      tags: [ai]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Pagina de mensagens.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object: { type: string, example: list }
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ChatMessage"
+                  next_cursor:
+                    type: string
+                    nullable: true
+        "404":
+          description: Sessao inexistente ou sem chat_access.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/sessions/{id}/access:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getV1SessionAccess
+      summary: Lista colaboradores da sessao
+      description: "Requer JWT + permission `ai:chat`. Papel minimo na sessao: `viewer`."
+      tags: [ai]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Lista de colaboradores.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AccessEntry"
+                  count: { type: integer }
+        "404":
+          description: Sessao inexistente ou sem chat_access.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/sessions/{id}/access/{userId}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - name: userId
+        in: path
+        required: true
+        schema:
+          type: string
+    put:
+      operationId: putV1SessionAccessByUserId
+      summary: Concede ou atualiza o papel de um colaborador (upsert)
+      description: |
+        Requer JWT + permission `ai:chat`. Papel minimo na sessao: `owner`. Retorna 409
+        se a operacao deixaria a sessao sem nenhum `owner`.
+      tags: [ai]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AccessRoleInput"
+            example:
+              role: editor
+      responses:
+        "200":
+          description: Acesso concedido/atualizado.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  data:
+                    $ref: "#/components/schemas/AccessEntry"
+        "404":
+          description: Sessao inexistente ou sem chat_access.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: A sessao ficaria sem nenhum owner.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: { message: "Session must have at least one owner", type: invalid_request_error }
+    delete:
+      operationId: deleteV1SessionAccessByUserId
+      summary: Remove o acesso de um colaborador
+      description: |
+        Requer JWT + permission `ai:chat`. Requer papel `owner` quando removendo outro
+        usuario; auto-remocao (o proprio usuario) e permitida em qualquer papel, sem
+        checagem de owner.
+      tags: [ai]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Acesso removido.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+        "404":
+          description: Sessao ou acesso inexistente.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: A remocao deixaria a sessao sem nenhum owner.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/graphs:
+    post:
+      operationId: postV1Graphs
+      summary: Cria um grafo
+      description: Requer JWT + permission `graph:write`. O criador vira `owner` do grafo.
+      tags: [graph]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                id:
+                  type: string
+                  description: ID opcional fornecido pelo cliente; gerado (UUID) se omitido.
+                name:
+                  type: string
+              required: [name]
+            example:
+              name: Ingredientes
+      responses:
+        "201":
+          description: Grafo criado.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  data:
+                    $ref: "#/components/schemas/Graph"
+        "409":
+          description: Ja existe um grafo com esse id.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    get:
+      operationId: getV1Graphs
+      summary: Lista grafos que o usuario tem acesso
+      description: Requer JWT + permission `graph:read`. Lista grafos com qualquer papel em `graph_access`.
+      tags: [graph]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Lista de grafos.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Graph"
+                  count: { type: integer }
+  /v1/graphs/{graphId}/nodes:
+    parameters:
+      - name: graphId
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      operationId: postV1GraphNodes
+      summary: Cria um node (entidade) no grafo
+      description: "Requer JWT + permission `graph:write`. Papel minimo no grafo: `editor`."
+      tags: [graph]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NodeInput"
+            example:
+              type: ingredient
+              label: Alho
+              properties:
+                origin: "Ásia Central"
+              source_document_id: doc-alho-001
+      responses:
+        "201":
+          description: Node criado.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  data:
+                    $ref: "#/components/schemas/Node"
+        "400":
+          description: Campo obrigatorio ausente (type/label).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: { message: "Missing required field: label", type: invalid_request_error }
+        "404":
+          description: Grafo inexistente.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: { message: "Graph not found", type: invalid_request_error }
+    get:
+      operationId: getV1GraphNodes
+      summary: Lista nodes por tipo (e opcionalmente label)
+      description: "Requer JWT + permission `graph:read`. Papel minimo no grafo: `viewer`. Filtro de `label` e case-insensitive."
+      tags: [graph]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: type
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: label
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Lista de nodes.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Node"
+                  count: { type: integer }
+        "400":
+          description: Query param `type` ausente.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: { message: "Missing required query parameter: type", type: invalid_request_error }
+  /v1/graphs/{graphId}/nodes/{id}:
+    parameters:
+      - name: graphId
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: getV1GraphNodeById
+      summary: Busca um node por ID
+      description: "Requer JWT + permission `graph:read`. Papel minimo no grafo: `viewer`."
+      tags: [graph]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Node encontrado.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  data:
+                    $ref: "#/components/schemas/Node"
+        "404":
+          description: Node ou grafo inexistente.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: { message: "Node not found", type: invalid_request_error }
+    put:
+      operationId: putV1GraphNodeById
+      summary: Atualiza label/properties de um node
+      description: "Requer JWT + permission `graph:write`. Papel minimo no grafo: `editor`."
+      tags: [graph]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NodeUpdateInput"
+            example:
+              label: "Alho (fresco)"
+              properties:
+                origin: "Ásia Central"
+                notes: "atualizado após colheita"
+      responses:
+        "200":
+          description: Node atualizado.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  data:
+                    $ref: "#/components/schemas/Node"
+        "404":
+          description: Node ou grafo inexistente.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    delete:
+      operationId: deleteV1GraphNodeById
+      summary: Remove um node
+      description: "Requer JWT + permission `graph:write`. Papel minimo no grafo: `editor`. Cascateia para as edges do node."
+      tags: [graph]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Node removido.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+        "404":
+          description: Node ou grafo inexistente.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/graphs/{graphId}/edges:
+    parameters:
+      - name: graphId
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      operationId: postV1GraphEdges
+      summary: Cria uma edge (relacao entre dois nodes)
+      description: "Requer JWT + permission `graph:write`. Papel minimo no grafo: `editor`."
+      tags: [graph]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EdgeInput"
+            example:
+              from_node_id: "1a2b3c4d-5e6f-7g8h-9i0j-1k2l3m4n5o6p"
+              to_node_id: "2b3c4d5e-6f7g-8h9i-0j1k-2l3m4n5o6p7q"
+              relation: combines_with
+              properties:
+                context: "receitas de tempero"
+      responses:
+        "201":
+          description: Edge criada.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  data:
+                    $ref: "#/components/schemas/Edge"
+        "400":
+          description: Campo obrigatorio ausente, ou from_node_id/to_node_id inexistente no grafo.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Grafo inexistente.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/graphs/{graphId}/nodes/{id}/neighbors:
+    parameters:
+      - name: graphId
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: relation
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: type
+        in: query
+        required: false
+        schema:
+          type: string
+    get:
+      operationId: getV1GraphNodeNeighbors
+      summary: Vizinhos diretos de um node
+      description: "Requer JWT + permission `graph:read`. Papel minimo no grafo: `viewer`."
+      tags: [graph]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Lista de vizinhos.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  data:
+                    type: array
+                    items:
+                      type: object
+                  count: { type: integer }
+        "404":
+          description: Node ou grafo inexistente.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/graphs/{graphId}/nodes/{id}/relations:
+    parameters:
+      - name: graphId
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: to
+        in: query
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: getV1GraphNodeRelations
+      summary: Relacoes diretas entre dois nodes
+      description: "Requer JWT + permission `graph:read`. Papel minimo no grafo: `viewer`."
+      tags: [graph]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Lista de relacoes diretas (pode ser vazia).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Edge"
+                  count: { type: integer }
+        "400":
+          description: Query param `to` ausente.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Node, grafo ou node de destino inexistente.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/graphs/{graphId}/nodes/{id}/paths:
+    parameters:
+      - name: graphId
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: to
+        in: query
+        required: false
+        schema:
+          type: string
+        description: Quando omitido, retorna todos os nodes alcancaveis (modo "reachable").
+      - name: maxDepth
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 3
+          minimum: 1
+          maximum: 6
+        description: Clampado no intervalo 1-6 (nao gera erro fora do range).
+      - name: relation
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: direction
+        in: query
+        required: false
+        schema:
+          type: string
+          enum: [any, out, in]
+    get:
+      operationId: getV1GraphNodePaths
+      summary: Travessia multi-hop a partir de um node
+      description: "Requer JWT + permission `graph:read`. Papel minimo no grafo: `viewer`."
+      tags: [graph]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Nodes alcancaveis ("reachable") ou caminhos ate um node especifico ("paths").
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  mode: { type: string, enum: [reachable, paths] }
+                  data:
+                    type: array
+                    items:
+                      type: object
+                  count: { type: integer }
+        "404":
+          description: Node de origem, grafo, ou node "to" inexistente no grafo.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: { message: "to node not found in this graph", type: invalid_request_error }
+  /v1/graphs/{graphId}/access:
+    parameters:
+      - name: graphId
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: getV1GraphAccess
+      summary: Lista colaboradores do grafo
+      description: "Requer JWT + permission `graph:read`. Papel minimo no grafo: `viewer`."
+      tags: [graph]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Lista de colaboradores.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AccessEntry"
+                  count: { type: integer }
+        "404":
+          description: Grafo inexistente.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/graphs/{graphId}/access/{userId}:
+    parameters:
+      - name: graphId
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: userId
+        in: path
+        required: true
+        schema:
+          type: string
+    put:
+      operationId: putV1GraphAccessByUserId
+      summary: Concede ou atualiza o papel de um colaborador (upsert)
+      description: |
+        Requer JWT + permission `graph:write`. Papel minimo no grafo: `owner`. Retorna
+        409 se a operacao deixaria o grafo sem nenhum `owner`.
+      tags: [graph]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AccessRoleInput"
+            example:
+              role: editor
+      responses:
+        "200":
+          description: Acesso concedido/atualizado.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  data:
+                    $ref: "#/components/schemas/AccessEntry"
+        "403":
+          description: Chamador nao e owner do grafo.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Grafo inexistente.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: O grafo ficaria sem nenhum owner.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: { message: "Graph must have at least one owner", type: invalid_request_error }
+    delete:
+      operationId: deleteV1GraphAccessByUserId
+      summary: Remove o acesso de um colaborador
+      description: |
+        Auto-remocao (o proprio usuario) requer apenas `graph:read`, sem checagem de
+        owner. Remocao de outro usuario requer `graph:write` + papel `owner` no grafo.
+      tags: [graph]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Acesso removido.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+        "404":
+          description: Grafo ou acesso inexistente.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /ingest:
+    post:
+      operationId: postIngest
+      summary: Ingesta um documento de texto (chunking + embeddings + R2 + Vectorize)
+      description: |
+        Requer JWT + permission `rag:ingest` -- exceto quando `JWT_SECRET` nao esta
+        configurado no worker (fallback usado em dev), caso em que a autenticacao e
+        pulada. `text` e obrigatorio, maximo de 512KB. Dispara, em segundo plano
+        (`ctx.waitUntil`), extracao de entidades e sincronizacao com o graph-worker
+        (grafo `graphId`, default `"rag-documents"`) -- best effort, nao bloqueia a resposta.
+      tags: [rag]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                id:
+                  type: string
+                  description: ID opcional; deve casar com [A-Za-z0-9][A-Za-z0-9._-]{0,127}. Gerado (UUID) se omitido.
+                text:
+                  type: string
+                  maxLength: 524288
+                source:
+                  type: string
+                metadata:
+                  type: object
+                  description: Ate 16 propriedades string/number/boolean; chaves reservadas (documentId, chunkIndex, source, text) nao sao permitidas.
+                graphId:
+                  type: string
+                  default: rag-documents
+              required: [text]
+            examples:
+              defaultGraph:
+                summary: graphId default (rag-documents)
+                value:
+                  text: "Alho é um tempero versátil usado em muitas culinárias..."
+                  source: wikipedia
+                  metadata:
+                    type: ingredient
+              explicitGraph:
+                summary: graphId explicito
+                value:
+                  text: "Alho combina bem com azeite, limão e ervas frescas em receitas mediterrâneas."
+                  source: wikipedia
+                  graphId: ingredients
+                  metadata:
+                    type: ingredient
+      responses:
+        "201":
+          description: Documento ingerido.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  documentId: { type: string }
+                  chunks: { type: integer }
+                  vectorIds:
+                    type: array
+                    items: { type: string }
+                  objects:
+                    type: object
+                    properties:
+                      source: { type: string }
+                      manifest: { type: string }
+                  mutationId:
+                    type: string
+                    nullable: true
+        "400":
+          description: Campo `text` ausente/vazio, `metadata` invalida, ou `id`/`graphId` malformado.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthErrorResponse"
+              example:
+                error: "field 'text' is required and must be a non-empty string"
+        "401":
+          description: Sem token de autenticacao (quando JWT_SECRET esta configurado).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthErrorResponse"
+        "413":
+          description: Texto acima de 512KB.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthErrorResponse"
+  /query:
+    post:
+      operationId: postQuery
+      summary: Busca semantica + geracao de resposta (RAG)
+      description: |
+        Requer JWT + permission `rag:query` -- exceto quando `JWT_SECRET` nao esta
+        configurado no worker (fallback usado em dev). `question` e obrigatorio,
+        maximo de 2000 caracteres.
+      tags: [rag]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                question:
+                  type: string
+                  maxLength: 2000
+                topK:
+                  type: integer
+                  default: 5
+                filter:
+                  type: object
+              required: [question]
+            example:
+              question: "Como preparar alho?"
+              topK: 5
+      responses:
+        "200":
+          description: Resposta gerada a partir do contexto recuperado.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  question: { type: string }
+                  answer: { type: string }
+                  sources:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        score: { type: number }
+                        documentId: { type: string, nullable: true }
+                        chunkIndex: { type: integer, nullable: true }
+                        source: { type: string, nullable: true }
+        "400":
+          description: Campo `question` ausente/vazio, ou `filter` invalido.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthErrorResponse"
+              example:
+                error: "field 'question' is required and must be a non-empty string"
+        "401":
+          description: Sem token de autenticacao (quando JWT_SECRET esta configurado).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthErrorResponse"
+        "413":
+          description: Pergunta acima de 2000 caracteres.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthErrorResponse"
+  /v1/graphrag/query:
+    post:
+      operationId: postV1GraphragQuery
+      summary: Q&A hibrido (busca vetorial + travessia do grafo)
+      description: |
+        Requer JWT + permission `graphrag:query`. Combina `RAG_WORKER.query()` (busca
+        vetorial), extracao de entidades via `AI_WORKER` e travessia estrutural via
+        `GRAPH_WORKER.findNodeByLabel()`/`findPaths()` (best-effort: falhas de lookup no
+        grafo degradam para "sem contexto estrutural para essa entidade", sem falhar a
+        request inteira). `question` e obrigatorio, maximo de 2000 caracteres. `graphId`
+        default `"rag-documents"`, `maxDepth` default 2.
+      tags: [graphrag]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                question:
+                  type: string
+                  maxLength: 2000
+                graphId:
+                  type: string
+                  default: rag-documents
+                maxDepth:
+                  type: integer
+                  default: 2
+                topK:
+                  type: integer
+              required: [question]
+            examples:
+              ingredientsGraph:
+                summary: Sobre o grafo "ingredients" (recomendacoes do api-worker)
+                value:
+                  question: "Com que ingredientes o alho combina bem?"
+                  graphId: ingredients
+                  topK: 5
+                  maxDepth: 2
+              defaultGraph:
+                summary: Sobre o grafo default (rag-documents)
+                value:
+                  question: "Como o alho é usado na culinária mediterrânea?"
+              missingQuestion:
+                summary: question ausente (400)
+                value:
+                  graphId: ingredients
+      responses:
+        "200":
+          description: Resposta hibrida, com fontes vetoriais e contexto estrutural do grafo.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  question: { type: string }
+                  answer: { type: string }
+                  sources:
+                    type: array
+                    items:
+                      type: object
+                  graphContext:
+                    type: array
+                    items:
+                      type: object
+                    description: Vazio quando nenhuma entidade da pergunta foi encontrada no grafo (resposta baseada so no contexto vetorial).
+        "400":
+          description: Campo `question` ausente/vazio ou acima de 2000 caracteres.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: { message: "field 'question' is required and must be a non-empty string", type: invalid_request_error }
+        "401":
+          description: Sem token de autenticacao.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Token valido mas sem a permission `graphrag:query`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
