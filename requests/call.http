@@ -203,6 +203,21 @@ Authorization: Bearer {{jwtToken}}
   ]
 }
 
+### Chat completion with streaming (stream: true, returns text/event-stream chat.completion.chunk events, requires ai:chat permission)
+POST {{baseUrlAI}}/v1/chat/completions
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Explique como fazer uma receita de alho"
+    }
+  ],
+  "stream": true
+}
+
 ### Chat completion without a token (expect 401)
 POST {{baseUrlAI}}/v1/chat/completions
 Content-Type: application/json
@@ -265,6 +280,17 @@ Authorization: Bearer {{jwtToken}}
 {
   "content": "Explique como fazer uma receita de alho",
   "model": "@cf/mistral/mistral-7b-instruct-v0.1"
+}
+
+### Send a message with streaming (stream: true; returns SSE chat.completion.chunk events, assistant message is only persisted after the stream ends successfully, requires editor/owner)
+POST {{baseUrlAI}}/v1/sessions/{{sessionId}}/messages
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "content": "Explique como fazer uma receita de alho",
+  "model": "@cf/mistral/mistral-7b-instruct-v0.1",
+  "stream": true
 }
 
 ### List message history, paginated (ordered by created_at asc, requires viewer+)
