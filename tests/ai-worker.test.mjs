@@ -258,6 +258,66 @@ async function authHeader(payload = { sub: "user-1", permissions: ["ai:chat"] })
   return { authorization: `Bearer ${token}` };
 }
 
+// Second AI.run() mock mode: when called with stream: true, returns a raw
+// Workers AI SSE ReadableStream (`data: {"response":"token"}\n\n`, terminated
+// by `data: [DONE]\n\n`) instead of the plain object the default harness mock
+// returns. `failAfter` simulates the underlying stream erroring out mid-way
+// (e.g. a model failure) by calling controller.error() instead of enqueuing
+// the remaining chunks.
+function createStreamingAI({
+  chunks = ["mocked ", "response"],
+  usage = { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+  failAfter = null,
+  runCalls,
+} = {}) {
+  const encoder = new TextEncoder();
+  return {
+    async run(model, input) {
+      if (runCalls) runCalls.push({ model, input });
+
+      if (!input.stream) {
+        return { response: chunks.join(""), usage };
+      }
+
+      return new ReadableStream({
+        async start(controller) {
+          for (let i = 0; i < chunks.length; i++) {
+            if (failAfter !== null && i === failAfter) {
+              controller.error(new Error("simulated stream failure"));
+              return;
+            }
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ response: chunks[i] })}\n\n`));
+            // Yield a macrotask (not just a microtask) so the consumer's
+            // reader.read() pipeline actually has a chance to drain this
+            // chunk first -- per the ReadableStream spec, controller.error()
+            // discards any chunks still sitting in the internal queue that
+            // no pending read() has claimed yet, so a same-tick error right
+            // after enqueue() can silently drop it before any test assertion
+            // ever sees it.
+            await new Promise((resolve) => setTimeout(resolve, 0));
+          }
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ response: "", usage })}\n\n`));
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+          controller.close();
+        },
+      });
+    },
+  };
+}
+
+// Reads a text/event-stream Response body fully and splits it back into
+// individual events: parsed JSON for `data: {...}` lines, or the literal
+// string "[DONE]" for the terminator.
+async function readSSEEvents(response) {
+  const text = await response.text();
+  return text
+    .split("\n\n")
+    .map((chunk) => chunk.trim())
+    .filter(Boolean)
+    .map((chunk) => chunk.replace(/^data:\s*/, ""))
+    .map((payload) => (payload === "[DONE]" ? "[DONE]" : JSON.parse(payload)));
+}
+
 test("GET /health reports service status", async () => {
   const { get } = harness();
   const { status, body } = await get("/health");
@@ -360,6 +420,87 @@ test("POST /v1/chat/completions fails closed when JWT_SECRET is missing", async 
 
   assert.equal(status, 500);
   assert.match(body.error.message, /JWT_SECRET/);
+});
+
+// --- Streaming (docs/specs/chat-streaming.md) ---
+
+test("POST /v1/chat/completions with stream: true returns chat.completion.chunk SSE events", async () => {
+  const { worker } = harness({ AI: createStreamingAI({ chunks: ["hello ", "world"] }) });
+  const headers = await authHeader();
+
+  const response = await worker.fetch(
+    new Request("https://ai.test/v1/chat/completions", {
+      method: "POST",
+      body: JSON.stringify({ messages: [{ role: "user", content: "hi" }], stream: true }),
+      headers: { "content-type": "application/json", ...headers },
+    })
+  );
+
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type"), /text\/event-stream/);
+
+  const events = await readSSEEvents(response);
+  assert.equal(events[events.length - 1], "[DONE]");
+
+  const contentEvents = events.slice(0, -3);
+  assert.deepEqual(
+    contentEvents.map((e) => e.choices[0].delta.content),
+    ["hello ", "world"]
+  );
+  for (const e of contentEvents) {
+    assert.equal(e.object, "chat.completion.chunk");
+    assert.equal(e.choices[0].finish_reason, null);
+  }
+
+  const [finishEvent, usageEvent] = events.slice(-3, -1);
+  assert.deepEqual(finishEvent.choices[0].delta, {});
+  assert.equal(finishEvent.choices[0].finish_reason, "stop");
+  assert.deepEqual(usageEvent.usage, { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
+});
+
+test("POST /v1/chat/completions without stream (or stream: false) behaves exactly as before", async () => {
+  const { post } = harness({ AI: createStreamingAI({ chunks: ["hello ", "world"] }) });
+  const headers = await authHeader();
+
+  const withoutField = await post("/v1/chat/completions", { messages: [{ role: "user", content: "hi" }] }, headers);
+  assert.equal(withoutField.status, 200);
+  assert.equal(withoutField.body.object, "chat.completion");
+  assert.equal(withoutField.body.choices[0].message.content, "hello world");
+
+  const explicitFalse = await post(
+    "/v1/chat/completions",
+    { messages: [{ role: "user", content: "hi" }], stream: false },
+    headers
+  );
+  assert.equal(explicitFalse.status, 200);
+  assert.equal(explicitFalse.body.object, "chat.completion");
+});
+
+test("a failure mid-stream in /v1/chat/completions emits an error chunk + [DONE], HTTP status stays 200", async () => {
+  const { worker } = harness({ AI: createStreamingAI({ chunks: ["hello ", "world"], failAfter: 1 }) });
+  const headers = await authHeader();
+
+  const response = await worker.fetch(
+    new Request("https://ai.test/v1/chat/completions", {
+      method: "POST",
+      body: JSON.stringify({ messages: [{ role: "user", content: "hi" }], stream: true }),
+      headers: { "content-type": "application/json", ...headers },
+    })
+  );
+
+  assert.equal(response.status, 200);
+
+  const events = await readSSEEvents(response);
+  assert.equal(events[events.length - 1], "[DONE]");
+
+  const errorEvent = events[events.length - 2];
+  assert.ok(errorEvent.error);
+  assert.equal(errorEvent.error.type, "internal_error");
+  assert.match(errorEvent.error.message, /simulated stream failure/);
+
+  // Only the one content chunk before the failure should have been forwarded.
+  assert.equal(events.length, 3);
+  assert.equal(events[0].choices[0].delta.content, "hello ");
 });
 
 test("a system message is merged into the first user message before reaching Workers AI", async () => {
@@ -513,6 +654,73 @@ test("POST /v1/sessions/:id/messages rejects empty content", async () => {
 
   assert.equal((await post(`/v1/sessions/${sessionId}/messages`, {}, headers)).status, 400);
   assert.equal((await post(`/v1/sessions/${sessionId}/messages`, { content: "   " }, headers)).status, 400);
+});
+
+test("POST /v1/sessions/:id/messages with stream: true persists the full assistant message only after the stream ends", async () => {
+  const { worker, post, get } = harness({ AI: createStreamingAI({ chunks: ["hello ", "world"] }) });
+  const headers = await authHeader();
+
+  const created = await post("/v1/sessions", {}, headers);
+  const sessionId = created.body.id;
+
+  const response = await worker.fetch(
+    new Request(`https://ai.test/v1/sessions/${sessionId}/messages`, {
+      method: "POST",
+      body: JSON.stringify({ content: "hi", stream: true }),
+      headers: { "content-type": "application/json", ...headers },
+    })
+  );
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type"), /text\/event-stream/);
+
+  const events = await readSSEEvents(response);
+  assert.equal(events[events.length - 1], "[DONE]");
+
+  const messagesAfter = await get(`/v1/sessions/${sessionId}/messages`, headers);
+  const assistantMessage = messagesAfter.body.data.find((m) => m.role === "assistant");
+  assert.ok(assistantMessage, "assistant message should be persisted after the stream ends");
+  assert.equal(assistantMessage.content, "hello world");
+
+  const userMessage = messagesAfter.body.data.find((m) => m.role === "user");
+  assert.equal(userMessage.content, "hi");
+});
+
+test("a failure mid-stream in /v1/sessions/:id/messages persists nothing from the assistant, but the user message stays", async () => {
+  const { worker, post, get } = harness({ AI: createStreamingAI({ chunks: ["hello ", "world"], failAfter: 1 }) });
+  const headers = await authHeader();
+
+  const created = await post("/v1/sessions", {}, headers);
+  const sessionId = created.body.id;
+
+  const response = await worker.fetch(
+    new Request(`https://ai.test/v1/sessions/${sessionId}/messages`, {
+      method: "POST",
+      body: JSON.stringify({ content: "hi", stream: true }),
+      headers: { "content-type": "application/json", ...headers },
+    })
+  );
+  assert.equal(response.status, 200);
+
+  const events = await readSSEEvents(response);
+  const errorEvent = events[events.length - 2];
+  assert.ok(errorEvent.error);
+
+  const messagesAfter = await get(`/v1/sessions/${sessionId}/messages`, headers);
+  assert.equal(messagesAfter.body.data.filter((m) => m.role === "assistant").length, 0);
+  assert.equal(messagesAfter.body.data.filter((m) => m.role === "user").length, 1);
+  assert.equal(messagesAfter.body.data[0].content, "hi");
+});
+
+test("a viewer with stream: true on /v1/sessions/:id/messages gets 403 without starting a stream", async () => {
+  const db = createChatDB();
+  seedSession(db, { id: "s1", owners: ["user-1"], viewers: ["user-2"] });
+  const { post } = harness({ CHAT_DB: db, AI: createStreamingAI() });
+  const viewerHeaders = await authHeader({ sub: "user-2", permissions: ["ai:chat"] });
+
+  const { status, body } = await post("/v1/sessions/s1/messages", { content: "hi", stream: true }, viewerHeaders);
+
+  assert.equal(status, 403);
+  assert.equal(body.error !== undefined, true);
 });
 
 test("a session with more than 20 messages only sends the last 20 to the model, but every message stays persisted", async () => {

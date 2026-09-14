@@ -1,6 +1,13 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
 import { json, badRequest, notFound, internalError, conflict } from "./lib/response.mjs";
-import { chatCompletion, getAvailableModels, validateChatCompletionRequest, ValidationError } from "./lib/ai.mjs";
+import {
+  chatCompletion,
+  chatCompletionStream,
+  createChatCompletionChunkStream,
+  getAvailableModels,
+  validateChatCompletionRequest,
+  ValidationError,
+} from "./lib/ai.mjs";
 import { requirePermission, AuthError } from "./lib/auth.mjs";
 import {
   createSession,
@@ -117,12 +124,14 @@ function handleInfo() {
       health: "GET /health",
       info: "GET /",
       models: "GET /v1/models",
-      chat_completions: "POST /v1/chat/completions (requires auth + ai:chat permission)",
+      chat_completions:
+        "POST /v1/chat/completions (requires auth + ai:chat permission; body { stream: true } returns text/event-stream chat.completion.chunk events instead of a single JSON response)",
       create_session: "POST /v1/sessions (requires auth + ai:chat permission, creator becomes owner)",
       list_sessions: "GET /v1/sessions?limit=&cursor= (requires auth + ai:chat permission, lists sessions you have chat_access to, ordered by updated_at desc)",
       get_session: "GET /v1/sessions/:id (requires auth + ai:chat permission + viewer+ role; metadata only, no messages)",
       rename_session: "PATCH /v1/sessions/:id (requires auth + ai:chat permission + editor/owner role, body { title })",
-      send_message: "POST /v1/sessions/:id/messages (requires auth + ai:chat permission + editor/owner role)",
+      send_message:
+        "POST /v1/sessions/:id/messages (requires auth + ai:chat permission + editor/owner role; body { stream: true } streams the reply via SSE and persists the full assistant message only after the stream ends successfully)",
       list_messages: "GET /v1/sessions/:id/messages?limit=&cursor= (requires auth + ai:chat permission + viewer+ role, ordered by created_at asc)",
       delete_session: "DELETE /v1/sessions/:id (requires auth + ai:chat permission + owner role)",
       grant_access: "PUT /v1/sessions/:id/access/:userId (requires auth + ai:chat permission + owner role, upserts a collaborator's role)",
@@ -148,6 +157,10 @@ async function handleChatCompletion(request, env) {
     const body = await request.json();
     const validated = validateChatCompletionRequest(body);
 
+    if (body.stream === true) {
+      return await streamChatCompletionResponse(env.AI, validated);
+    }
+
     const result = await chatCompletion(env.AI, validated.messages, {
       model: validated.model,
       temperature: validated.temperature,
@@ -162,6 +175,26 @@ async function handleChatCompletion(request, env) {
     }
     return internalError(error.message);
   }
+}
+
+// Setup (ai.run() itself failing, e.g. binding down) throws before this
+// returns, so it's still caught by handleChatCompletion's try/catch above and
+// surfaces as a normal JSON error response -- headers/status for the SSE
+// response are only sent once this Response is actually returned.
+async function streamChatCompletionResponse(ai, validated) {
+  const { id, created, model, events } = await chatCompletionStream(ai, validated.messages, {
+    model: validated.model,
+    temperature: validated.temperature,
+    max_tokens: validated.max_tokens,
+    top_p: validated.top_p,
+  });
+
+  const stream = createChatCompletionChunkStream(events, { id, created, model });
+
+  return new Response(stream, {
+    status: 200,
+    headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" },
+  });
 }
 
 async function handleCreateSession(request, env) {
@@ -266,7 +299,7 @@ async function handleSendMessage(request, env, sessionId) {
   }
 
   const body = await request.json();
-  const { content, model } = body;
+  const { content, model, stream } = body;
 
   if (typeof content !== "string" || !content.trim()) {
     throw new ValidationError("content is required and must be a non-empty string");
@@ -280,6 +313,10 @@ async function handleSendMessage(request, env, sessionId) {
   const recentMessages = await listRecentMessages(env.CHAT_DB, sessionId);
   const modelMessages = recentMessages.map((m) => ({ role: m.role, content: m.content }));
 
+  if (stream === true) {
+    return await streamSendMessageResponse(env, sessionId, modelMessages, { model, userContent: content });
+  }
+
   const result = await chatCompletion(env.AI, modelMessages, { model });
   const assistantContent = result.choices[0].message.content;
 
@@ -290,6 +327,29 @@ async function handleSendMessage(request, env, sessionId) {
     session_id: sessionId,
     message: { role: "assistant", content: assistantContent },
     usage: result.usage,
+  });
+}
+
+// Buffer + forward: chunks stream to the client as they arrive, but the
+// assistant message is only persisted (addMessage + touchSession, same as
+// the non-streaming path above) once the stream ends successfully -- via
+// onComplete, which createChatCompletionChunkStream runs after the last
+// content event and before the finish_reason/usage/[DONE] chunks. If the
+// stream fails mid-way, onComplete never runs, so nothing from the assistant
+// is persisted; the user message (already persisted by the caller) stays.
+async function streamSendMessageResponse(env, sessionId, modelMessages, { model, userContent }) {
+  const { id, created, model: usedModel, events } = await chatCompletionStream(env.AI, modelMessages, { model });
+
+  const stream = createChatCompletionChunkStream(events, { id, created, model: usedModel }, {
+    onComplete: async (assistantContent) => {
+      await addMessage(env.CHAT_DB, { sessionId, role: "assistant", content: assistantContent });
+      await touchSession(env.CHAT_DB, sessionId, { title: userContent.slice(0, TITLE_MAX_LENGTH) });
+    },
+  });
+
+  return new Response(stream, {
+    status: 200,
+    headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" },
   });
 }
 

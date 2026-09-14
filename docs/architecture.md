@@ -95,7 +95,7 @@ GET    /health                - Health check
 GET    /                       - Service info
 ```
 
-`GET /v1/models`, `GET /health` e `GET /` continuam públicos. `POST /v1/chat/completions` exige JWT Bearer com a permission `ai:chat` (hoje atribuída só ao profile `Admin`), conforme [ADR 0014](decisions/0014-ai-chat-and-auth-stats-permission-enforcement.md).
+`GET /v1/models`, `GET /health` e `GET /` continuam públicos. `POST /v1/chat/completions` exige JWT Bearer com a permission `ai:chat` (hoje atribuída só ao profile `Admin`), conforme [ADR 0014](decisions/0014-ai-chat-and-auth-stats-permission-enforcement.md). Conforme [ADR 0021](decisions/0021-chat-streaming.md), o corpo aceita `stream: true` para retornar a resposta como SSE (`Content-Type: text/event-stream`, eventos `chat.completion.chunk` estilo OpenAI) em vez de um JSON único.
 
 Modelos suportados:
 - `@cf/meta/llama-2-7b-chat-int8` (padrão)
@@ -121,7 +121,7 @@ DELETE /v1/sessions/:id/access/:userId    - Revoga acesso de alguém (requer own
 GET    /v1/sessions/:id/access            - Lista colaboradores da sessão (requer viewer+)
 ```
 
-Todas exigem JWT Bearer com a permission `ai:chat` (a mesma de `/v1/chat/completions`, nenhuma nova permission foi criada — o papel dentro da sessão já controla o resto). Acesso a cada sessão é controlado por `chat_access` (papéis `owner`/`editor`/`viewer`, mesmo modelo de `graph_access`, [ADR 0012](decisions/0012-graph-worker-knowledge-graph.md)): `owner` lê, escreve, renomeia, gerencia colaboradores e apaga a sessão; `editor` lê, escreve e renomeia; `viewer` só lê. Toda sessão sempre tem ao menos um `owner` (invariante aplicada em `PUT`/`DELETE .../access`). Ator sem nenhuma linha em `chat_access` recebe `404` (não vaza existência da sessão); ator com papel insuficiente recebe `403`. Histórico completo é sempre persistido, mas só as últimas 20 mensagens da sessão são enviadas como contexto para `AI.run()` em cada nova mensagem. `GET /v1/sessions` e `GET /v1/sessions/:id/messages` usam paginação keyset com cursor opaco em base64 (`limit` default 20, máx 100).
+Todas exigem JWT Bearer com a permission `ai:chat` (a mesma de `/v1/chat/completions`, nenhuma nova permission foi criada — o papel dentro da sessão já controla o resto). Acesso a cada sessão é controlado por `chat_access` (papéis `owner`/`editor`/`viewer`, mesmo modelo de `graph_access`, [ADR 0012](decisions/0012-graph-worker-knowledge-graph.md)): `owner` lê, escreve, renomeia, gerencia colaboradores e apaga a sessão; `editor` lê, escreve e renomeia; `viewer` só lê. Toda sessão sempre tem ao menos um `owner` (invariante aplicada em `PUT`/`DELETE .../access`). Ator sem nenhuma linha em `chat_access` recebe `404` (não vaza existência da sessão); ator com papel insuficiente recebe `403`. Histórico completo é sempre persistido, mas só as últimas 20 mensagens da sessão são enviadas como contexto para `AI.run()` em cada nova mensagem. `GET /v1/sessions` e `GET /v1/sessions/:id/messages` usam paginação keyset com cursor opaco em base64 (`limit` default 20, máx 100). Conforme [ADR 0021](decisions/0021-chat-streaming.md), `POST /v1/sessions/:id/messages` também aceita `stream: true`: a resposta é enviada como SSE e a mensagem completa do assistente só é persistida (`addMessage` + `touchSession`) depois que o stream termina com sucesso — se falhar no meio, nada do assistente é gravado.
 
 ## RAG Worker (retrieval-augmented generation)
 
