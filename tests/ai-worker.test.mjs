@@ -124,7 +124,18 @@ function createChatDB(seedSessions = [], seedAccess = [], seedMessages = []) {
       },
       async run() {
         if (sql.startsWith("INSERT INTO chat_sessions")) {
-          const [id, userId, agentId, agentSystemPrompt, agentModel, agentTemperature, agentMaxTokens, agentTopP] = boundArgs;
+          const [
+            id,
+            userId,
+            agentId,
+            agentSystemPrompt,
+            agentModel,
+            agentTemperature,
+            agentMaxTokens,
+            agentTopP,
+            agentTools,
+            agentMaxToolIterations,
+          ] = boundArgs;
           const now = nextTimestamp();
           sessions.push({
             id,
@@ -136,6 +147,8 @@ function createChatDB(seedSessions = [], seedAccess = [], seedMessages = []) {
             agent_temperature: agentTemperature ?? null,
             agent_max_tokens: agentMaxTokens ?? null,
             agent_top_p: agentTopP ?? null,
+            agent_tools: agentTools ?? null,
+            agent_max_tool_iterations: agentMaxToolIterations ?? null,
             created_at: now,
             updated_at: now,
           });
@@ -303,7 +316,7 @@ function createAgentsDB(seedAgents = [], seedAccess = []) {
       },
       async run() {
         if (sql.startsWith("INSERT INTO agents")) {
-          const [id, name, systemPrompt, model, temperature, maxTokens, topP] = boundArgs;
+          const [id, name, systemPrompt, model, temperature, maxTokens, topP, tools, maxToolIterations] = boundArgs;
           const now = nextTimestamp();
           agents.push({
             id,
@@ -313,6 +326,8 @@ function createAgentsDB(seedAgents = [], seedAccess = []) {
             temperature: temperature ?? null,
             max_tokens: maxTokens ?? null,
             top_p: topP ?? null,
+            tools: tools ?? null,
+            max_tool_iterations: maxToolIterations ?? null,
             created_at: now,
             updated_at: now,
           });
@@ -336,7 +351,7 @@ function createAgentsDB(seedAgents = [], seedAccess = []) {
           return { success: true };
         }
         if (sql.startsWith("UPDATE agents")) {
-          const [name, systemPrompt, model, temperature, maxTokens, topP, id] = boundArgs;
+          const [name, systemPrompt, model, temperature, maxTokens, topP, tools, maxToolIterations, id] = boundArgs;
           const row = agents.find((a) => a.id === id);
           if (row) {
             row.name = name;
@@ -345,6 +360,8 @@ function createAgentsDB(seedAgents = [], seedAccess = []) {
             row.temperature = temperature ?? null;
             row.max_tokens = maxTokens ?? null;
             row.top_p = topP ?? null;
+            row.tools = tools ?? null;
+            row.max_tool_iterations = maxToolIterations ?? null;
             row.updated_at = nextTimestamp();
           }
           return { success: true };
@@ -378,7 +395,20 @@ function createAgentsDB(seedAgents = [], seedAccess = []) {
 // mirroring seedSession() above.
 function seedAgent(
   db,
-  { id = "a1", name = "Agent", systemPrompt = "You are helpful.", model = "@cf/mistral/mistral-7b-instruct-v0.1", temperature = null, maxTokens = null, topP = null, owners, editors = [], viewers = [] } = {}
+  {
+    id = "a1",
+    name = "Agent",
+    systemPrompt = "You are helpful.",
+    model = "@cf/mistral/mistral-7b-instruct-v0.1",
+    temperature = null,
+    maxTokens = null,
+    topP = null,
+    tools = null,
+    maxToolIterations = null,
+    owners,
+    editors = [],
+    viewers = [],
+  } = {}
 ) {
   const ownerIds = owners || ["user-1"];
   const createdAt = db._nextTimestamp();
@@ -390,6 +420,8 @@ function seedAgent(
     temperature,
     max_tokens: maxTokens,
     top_p: topP,
+    tools: tools ? JSON.stringify(tools) : null,
+    max_tool_iterations: maxToolIterations,
     created_at: createdAt,
     updated_at: createdAt,
   });
@@ -488,6 +520,49 @@ function createStreamingAI({
           controller.close();
         },
       });
+    },
+  };
+}
+
+// Mock of env.AI for the tool-calling loop (docs/specs/agent-tool-calling.md).
+// Non-streaming calls (runToolCallingLoop's rounds) walk through `turns` in
+// order, each shaped like the raw Workers AI response
+// ({ response, tool_calls, usage }); the last turn repeats for any extra
+// calls beyond turns.length (e.g. the forced tools-less final call). A
+// streaming call (input.stream === true, used only for the final replay when
+// the client asked for stream: true) ignores `turns` and instead emits
+// `streamChunks` (defaulting to the last turn's response) as a raw Workers AI
+// SSE stream, exactly like createStreamingAI() above.
+function createToolCallingAI({ turns, streamChunks, usage = { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 }, runCalls } = {}) {
+  const encoder = new TextEncoder();
+  let callIndex = 0;
+
+  return {
+    async run(model, input) {
+      if (runCalls) runCalls.push({ model, input });
+
+      if (input.stream) {
+        const chunks = streamChunks || [turns[turns.length - 1].response];
+        return new ReadableStream({
+          async start(controller) {
+            for (const chunk of chunks) {
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ response: chunk })}\n\n`));
+              await new Promise((resolve) => setTimeout(resolve, 0));
+            }
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ response: "", usage })}\n\n`));
+            controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+            controller.close();
+          },
+        });
+      }
+
+      const turn = turns[Math.min(callIndex, turns.length - 1)];
+      callIndex += 1;
+      return {
+        response: turn.response ?? null,
+        tool_calls: turn.tool_calls ?? null,
+        usage,
+      };
     },
   };
 }
@@ -1632,4 +1707,268 @@ test("POST /v1/sessions/:id/messages without an agent snapshot uses the default 
   assert.equal(lastCall.input.temperature, 0.7);
   assert.equal(lastCall.input.max_tokens, 1024);
   assert.equal(lastCall.input.top_p, 1);
+});
+
+// --- Tool calling (docs/specs/agent-tool-calling.md, agent-tool-calling-out-of-scope.md) ---
+
+test("POST /v1/agents rejects an unknown tool name with 400", async () => {
+  const { post } = harness();
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:agents"] });
+
+  const { status, body } = await post(
+    "/v1/agents",
+    { name: "x", system_prompt: "y", model: "@cf/meta/llama-3.1-8b-instruct", tools: ["not_a_real_tool"] },
+    headers
+  );
+
+  assert.equal(status, 400);
+  assert.match(body.error.message, /Unknown tool/);
+});
+
+test("POST /v1/agents accepts known tools and defaults max_tool_iterations to 5", async () => {
+  const { post } = harness();
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:agents"] });
+
+  const { status, body } = await post(
+    "/v1/agents",
+    { name: "x", system_prompt: "y", model: "@cf/meta/llama-3.1-8b-instruct", tools: ["query_knowledge_base"] },
+    headers
+  );
+
+  assert.equal(status, 201);
+  assert.deepEqual(body.tools, ["query_knowledge_base"]);
+  assert.equal(body.max_tool_iterations, 5);
+});
+
+test("PATCH /v1/agents/:id rejects an unknown tool name with 400", async () => {
+  const db = createAgentsDB();
+  seedAgent(db, { id: "a1", owners: ["user-1"] });
+  const { patch } = harness({ AGENTS_DB: db });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:agents"] });
+
+  const { status, body } = await patch("/v1/agents/a1", { tools: ["bogus_tool"] }, headers);
+
+  assert.equal(status, 400);
+  assert.match(body.error.message, /Unknown tool/);
+});
+
+test("POST /v1/sessions with an agent that has tools snapshots tools and max_tool_iterations onto the session", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, {
+    id: "a1",
+    owners: ["user-1"],
+    model: "@cf/meta/llama-3.1-8b-instruct",
+    tools: ["query_knowledge_base"],
+    maxToolIterations: 3,
+  });
+  const { post, chatDb } = harness({ AGENTS_DB: agentsDb });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:chat"] });
+
+  const { status, body } = await post("/v1/sessions", { agent_id: "a1" }, headers);
+  assert.equal(status, 201);
+
+  const session = chatDb._sessions.find((s) => s.id === body.id);
+  assert.deepEqual(JSON.parse(session.agent_tools), ["query_knowledge_base"]);
+  assert.equal(session.agent_max_tool_iterations, 3);
+});
+
+test("POST /v1/sessions/:id/messages with agent tools runs the tool-calling loop and persists the full exchange in order", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, {
+    id: "a1",
+    owners: ["user-1"],
+    systemPrompt: "You are a helpful assistant.",
+    model: "@cf/meta/llama-3.1-8b-instruct",
+    tools: ["query_knowledge_base"],
+    maxToolIterations: 5,
+  });
+
+  const runCalls = [];
+  const ai = createToolCallingAI({
+    turns: [
+      { tool_calls: [{ name: "query_knowledge_base", arguments: { question: "what is x?" } }] },
+      { response: "The final answer is 42." },
+    ],
+    runCalls,
+  });
+
+  const ragCalls = [];
+  const ragWorker = {
+    async query(question, opts) {
+      ragCalls.push({ question, opts });
+      return { question, answer: "x is 42", sources: [{ id: "doc-1" }] };
+    },
+  };
+
+  const { post, get } = harness({ AGENTS_DB: agentsDb, AI: ai, RAG_WORKER: ragWorker });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:chat", "ai:agents"] });
+
+  const created = await post("/v1/sessions", { agent_id: "a1" }, headers);
+  const sessionId = created.body.id;
+
+  const sent = await post(`/v1/sessions/${sessionId}/messages`, { content: "what is x?" }, headers);
+
+  assert.equal(sent.status, 200);
+  assert.equal(sent.body.message.role, "assistant");
+  assert.equal(sent.body.message.content, "The final answer is 42.");
+
+  // The RAG tool was actually invoked with the model-provided question.
+  assert.equal(ragCalls.length, 1);
+  assert.equal(ragCalls[0].question, "what is x?");
+
+  // Only 2 rounds needed (tool_calls, then a final text answer) -> exactly 2 ai.run() calls.
+  assert.equal(runCalls.length, 2);
+  assert.ok(runCalls[0].input.tools && runCalls[0].input.tools.length > 0);
+  const firstRoles = runCalls[0].input.messages.map((m) => m.role);
+  assert.deepEqual(firstRoles, ["system", "user"], "native system role must be preserved, not merged into user");
+
+  // Full persisted history, in order: user, assistant(tool call), tool(result), assistant(final).
+  const messages = (await get(`/v1/sessions/${sessionId}/messages`, headers)).body.data;
+  assert.equal(messages.length, 4);
+  assert.equal(messages[0].role, "user");
+  assert.equal(messages[0].content, "what is x?");
+  assert.equal(messages[1].role, "assistant");
+  const toolCallRequest = JSON.parse(messages[1].content);
+  assert.equal(toolCallRequest.tool_calls[0].name, "query_knowledge_base");
+  assert.equal(messages[2].role, "tool");
+  const toolResult = JSON.parse(messages[2].content);
+  assert.equal(toolResult.answer, "x is 42");
+  assert.equal(messages[3].role, "assistant");
+  assert.equal(messages[3].content, "The final answer is 42.");
+});
+
+test("a failing tool becomes an error result fed back to the model, the loop continues instead of aborting", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, {
+    id: "a1",
+    owners: ["user-1"],
+    model: "@cf/meta/llama-3.1-8b-instruct",
+    tools: ["query_knowledge_base"],
+    maxToolIterations: 5,
+  });
+
+  const ai = createToolCallingAI({
+    turns: [
+      { tool_calls: [{ name: "query_knowledge_base", arguments: { question: "hi" } }] },
+      { response: "Sorry, I could not look that up." },
+    ],
+  });
+
+  // No RAG_WORKER binding configured at all -- the tool's own execute()
+  // throws "RAG_WORKER binding not configured".
+  const { post, get } = harness({ AGENTS_DB: agentsDb, AI: ai, RAG_WORKER: undefined });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:chat", "ai:agents"] });
+
+  const created = await post("/v1/sessions", { agent_id: "a1" }, headers);
+  const sessionId = created.body.id;
+
+  const sent = await post(`/v1/sessions/${sessionId}/messages`, { content: "hi" }, headers);
+
+  assert.equal(sent.status, 200);
+  assert.equal(sent.body.message.content, "Sorry, I could not look that up.");
+
+  const messages = (await get(`/v1/sessions/${sessionId}/messages`, headers)).body.data;
+  const toolMessage = messages.find((m) => m.role === "tool");
+  assert.ok(toolMessage);
+  const toolResult = JSON.parse(toolMessage.content);
+  assert.match(toolResult.error, /RAG_WORKER binding not configured/);
+});
+
+test("the tool-calling loop stops after max_tool_iterations cycles and forces a final tools-less call", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, {
+    id: "a1",
+    owners: ["user-1"],
+    model: "@cf/meta/llama-3.1-8b-instruct",
+    tools: ["query_knowledge_base"],
+    maxToolIterations: 2,
+  });
+
+  const runCalls = [];
+  const ai = createToolCallingAI({
+    turns: [
+      { tool_calls: [{ name: "query_knowledge_base", arguments: { question: "q1" } }] },
+      { tool_calls: [{ name: "query_knowledge_base", arguments: { question: "q2" } }] },
+      { response: "final after max iterations" },
+    ],
+    runCalls,
+  });
+  const ragWorker = { async query(question) { return { question, answer: "ok", sources: [] }; } };
+
+  const { post } = harness({ AGENTS_DB: agentsDb, AI: ai, RAG_WORKER: ragWorker });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:chat", "ai:agents"] });
+
+  const created = await post("/v1/sessions", { agent_id: "a1" }, headers);
+  const sessionId = created.body.id;
+
+  const sent = await post(`/v1/sessions/${sessionId}/messages`, { content: "hi" }, headers);
+
+  assert.equal(sent.status, 200);
+  assert.equal(sent.body.message.content, "final after max iterations");
+
+  // 2 tool-calling rounds (maxToolIterations) + 1 forced final call without tools.
+  assert.equal(runCalls.length, 3);
+  assert.ok(runCalls[0].input.tools && runCalls[0].input.tools.length > 0);
+  assert.ok(runCalls[1].input.tools && runCalls[1].input.tools.length > 0);
+  assert.equal(runCalls[2].input.tools, undefined, "the forced final call must omit tools entirely");
+});
+
+test("POST /v1/sessions/:id/messages with tools and stream: true returns the same final content as non-streaming", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, {
+    id: "a1",
+    owners: ["user-1"],
+    model: "@cf/meta/llama-3.1-8b-instruct",
+    tools: ["query_knowledge_base"],
+    maxToolIterations: 5,
+  });
+
+  const ai = createToolCallingAI({
+    turns: [
+      { tool_calls: [{ name: "query_knowledge_base", arguments: { question: "hi" } }] },
+      { response: "streamed final answer" },
+    ],
+    streamChunks: ["streamed ", "final ", "answer"],
+  });
+  const ragWorker = { async query(question) { return { question, answer: "ok", sources: [] }; } };
+
+  const { worker, post, get } = harness({ AGENTS_DB: agentsDb, AI: ai, RAG_WORKER: ragWorker });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:chat", "ai:agents"] });
+
+  const created = await post("/v1/sessions", { agent_id: "a1" }, headers);
+  const sessionId = created.body.id;
+
+  const response = await worker.fetch(
+    new Request(`https://ai.test/v1/sessions/${sessionId}/messages`, {
+      method: "POST",
+      body: JSON.stringify({ content: "hi", stream: true }),
+      headers: { "content-type": "application/json", ...headers },
+    })
+  );
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type"), /text\/event-stream/);
+
+  const events = await readSSEEvents(response);
+  assert.equal(events[events.length - 1], "[DONE]");
+
+  const messages = (await get(`/v1/sessions/${sessionId}/messages`, headers)).body.data;
+  const assistantFinal = messages[messages.length - 1];
+  assert.equal(assistantFinal.role, "assistant");
+  assert.equal(assistantFinal.content, "streamed final answer");
+});
+
+test("a session with an agent that has no tools (or tools: []) behaves exactly as before -- no tool-calling loop", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, { id: "a1", owners: ["user-1"], model: "@cf/mistral/mistral-7b-instruct-v0.1", tools: [] });
+  const { post, runCalls } = harness({ AGENTS_DB: agentsDb });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:chat", "ai:agents"] });
+
+  const created = await post("/v1/sessions", { agent_id: "a1" }, headers);
+  const sessionId = created.body.id;
+
+  const sent = await post(`/v1/sessions/${sessionId}/messages`, { content: "hi" }, headers);
+
+  assert.equal(sent.status, 200);
+  assert.equal(sent.body.message.content, "mocked response");
+  assert.equal(runCalls.length, 1, "no tool-calling loop should run for an agent without tools");
 });

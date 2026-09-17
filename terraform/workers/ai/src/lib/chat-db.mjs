@@ -87,13 +87,27 @@ export async function createSession(db, { userId, agentSnapshot = null }) {
   const agentTemperature = agentSnapshot?.temperature ?? null;
   const agentMaxTokens = agentSnapshot?.maxTokens ?? null;
   const agentTopP = agentSnapshot?.topP ?? null;
+  const agentTools =
+    agentSnapshot?.tools && agentSnapshot.tools.length > 0 ? JSON.stringify(agentSnapshot.tools) : null;
+  const agentMaxToolIterations = agentSnapshot?.maxToolIterations ?? null;
 
   await db
     .prepare(
-      `INSERT INTO chat_sessions (id, user_id, agent_id, agent_system_prompt, agent_model, agent_temperature, agent_max_tokens, agent_top_p)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO chat_sessions (id, user_id, agent_id, agent_system_prompt, agent_model, agent_temperature, agent_max_tokens, agent_top_p, agent_tools, agent_max_tool_iterations)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
-    .bind(id, userId, agentId, agentSystemPrompt, agentModel, agentTemperature, agentMaxTokens, agentTopP)
+    .bind(
+      id,
+      userId,
+      agentId,
+      agentSystemPrompt,
+      agentModel,
+      agentTemperature,
+      agentMaxTokens,
+      agentTopP,
+      agentTools,
+      agentMaxToolIterations
+    )
     .run();
 
   // The creator becomes the sole owner in chat_access -- same pattern as
@@ -136,7 +150,7 @@ export async function getSessionAgentConfig(db, id) {
 
   const row = await db
     .prepare(
-      "SELECT agent_system_prompt, agent_model, agent_temperature, agent_max_tokens, agent_top_p FROM chat_sessions WHERE id = ?"
+      "SELECT agent_system_prompt, agent_model, agent_temperature, agent_max_tokens, agent_top_p, agent_tools, agent_max_tool_iterations FROM chat_sessions WHERE id = ?"
     )
     .bind(id)
     .first();
@@ -149,6 +163,8 @@ export async function getSessionAgentConfig(db, id) {
     temperature: row.agent_temperature ?? null,
     maxTokens: row.agent_max_tokens ?? null,
     topP: row.agent_top_p ?? null,
+    tools: row.agent_tools ? JSON.parse(row.agent_tools) : null,
+    maxToolIterations: row.agent_max_tool_iterations ?? null,
   };
 }
 

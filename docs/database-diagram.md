@@ -194,12 +194,12 @@ Notas:
 - `chat_messages.session_id` e `chat_access.session_id` são `ON DELETE CASCADE` a partir de `chat_sessions` (D1 aplica `PRAGMA foreign_keys`, diferente do SQLite padrão).
 - `chat_sessions.user_id` não tem FK física para `dev-auth.users` (D1s são isolados) e, desde a migration 0015, deixou de ser a fonte de autorização — é só metadado histórico de quem criou a sessão. Toda checagem de acesso passa por `chat_access`.
 - `chat_access` é a ACL por sessão (`UNIQUE(session_id, user_id)`), mesmo modelo de `graph_access` ([ADR 0012](decisions/0012-graph-worker-knowledge-graph.md)): papéis `owner`/`editor`/`viewer`, com a invariante de que toda sessão deve manter ao menos um `owner` (aplicada em `chat-db.mjs`, não pelo schema — ver [ADR 0020](decisions/0020-chat-session-sharing-and-pagination.md)). A migration 0015 faz backfill de uma linha `owner` para cada sessão já existente antes dela.
-- `agent_id` e as cinco colunas `agent_*` (migration 0018) são todas nullable e sem `FOREIGN KEY` — `dev-agents` é um D1 separado e D1/SQLite não suporta FK cross-database. Preenchidas apenas quando a sessão é criada com um `agent_id` no corpo; ficam `null` caso contrário. Uma vez copiado, o snapshot nunca é atualizado a partir de `dev-agents` novamente ([ADR 0022](decisions/0022-agent-registration.md)).
+- `agent_id` e as sete colunas `agent_*` (migrations 0018 e 0020) são todas nullable e sem `FOREIGN KEY` — `dev-agents` é um D1 separado e D1/SQLite não suporta FK cross-database. Preenchidas apenas quando a sessão é criada com um `agent_id` no corpo; ficam `null` caso contrário. `agent_tools`/`agent_max_tool_iterations` (migration 0020) ficam `null` também quando o agent referenciado não declara `tools`. Uma vez copiado, o snapshot nunca é atualizado a partir de `dev-agents` novamente ([ADR 0022](decisions/0022-agent-registration.md), [ADR 0023](decisions/0023-agent-tool-calling.md)).
 - Índices em `chat_sessions.user_id`, `chat_messages.session_id` e `chat_access.user_id`.
 
 ## dev-agents
 
-Agents (configuração de IA reutilizável) do `ai-worker`, exclusivo desse worker ([ADR 0022](decisions/0022-agent-registration.md)). Migration: 0016.
+Agents (configuração de IA reutilizável) do `ai-worker`, exclusivo desse worker ([ADR 0022](decisions/0022-agent-registration.md)), com `tools`/`max_tool_iterations` a partir da [ADR 0023](decisions/0023-agent-tool-calling.md). Migrations: 0016, 0019.
 
 ```mermaid
 erDiagram
@@ -213,6 +213,8 @@ erDiagram
         real temperature "nullable"
         integer max_tokens "nullable"
         real top_p "nullable"
+        text tools "nullable, JSON array de nomes de tools"
+        integer max_tool_iterations "default 5"
         datetime created_at
         datetime updated_at
     }
@@ -228,6 +230,7 @@ erDiagram
 
 Notas:
 - `agent_access.agent_id` é `ON DELETE CASCADE` a partir de `agents`.
+- `tools`/`max_tool_iterations` (migration 0019, [ADR 0023](decisions/0023-agent-tool-calling.md)): `tools` é nullable, cada nome validado contra um catálogo fixo de tools conhecidas em código (`lib/tools.mjs`), não uma tabela; `max_tool_iterations` tem `DEFAULT 5`.
 - `agent_access` é a ACL por agent (`UNIQUE(agent_id, user_id)`), mesmo modelo de `chat_access`/`graph_access`: papéis `owner`/`editor`/`viewer`, com a invariante de que todo agent deve manter ao menos um `owner` (aplicada em `agent-db.mjs`, não pelo schema).
 - Índice em `agent_access.user_id` (listar "meus agents" via join, usado por `listAgentsForUser`).
 - Sem relação física com `dev-chat.chat_sessions.agent_id` — ver nota da seção `dev-chat` acima.

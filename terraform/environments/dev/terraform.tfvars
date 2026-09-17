@@ -51,7 +51,8 @@ d1_databases = {
     migrations = [
       "migrations/0014_create_chat_sessions.sql",
       "migrations/0015_add_chat_access.sql",
-      "migrations/0018_add_agent_snapshot_to_chat_sessions.sql"
+      "migrations/0018_add_agent_snapshot_to_chat_sessions.sql",
+      "migrations/0020_add_agent_tools_snapshot_to_chat_sessions.sql"
     ]
   }
   agents = {
@@ -59,7 +60,8 @@ d1_databases = {
     primary_location_hint = "wnam"
     run_migrations        = true
     migrations = [
-      "migrations/0016_create_agents.sql"
+      "migrations/0016_create_agents.sql",
+      "migrations/0019_add_tools_to_agents.sql"
     ]
   }
 }
@@ -108,6 +110,9 @@ workers = {
         type         = "d1"
         resource_key = "agents"
       }
+    ]
+    service_bindings = [
+      { name = "RAG_WORKER", target_rag = "rag" }
     ]
   }
   graph = {

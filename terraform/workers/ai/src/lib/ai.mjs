@@ -158,6 +158,47 @@ export async function chatCompletionStream(ai, messages, options = {}) {
   };
 }
 
+// Tool-calling counterpart to chatCompletion() (docs/specs/agent-tool-calling.md).
+// Deliberately does NOT call normalizeMessages(): Workers AI's function
+// calling requires the native "system" role (and, mid-loop, "tool" role
+// messages) to be preserved verbatim, unlike the ADR 0009 normalization the
+// rest of this file relies on for models without tool support. Always
+// non-streaming -- the caller needs the structured `tool_calls` field on the
+// response, which isn't observable while consuming a token stream. `tools`,
+// when provided, is passed straight to ai.run(); omitted entirely (not sent
+// as an empty array) when null/empty, mirroring how the other functions in
+// this file only set optional keys on the input object when they have a value.
+export async function chatCompletionWithTools(ai, messages, options = {}) {
+  const {
+    model = "@cf/meta/llama-3.1-8b-instruct",
+    temperature = 0.7,
+    max_tokens = 1024,
+    top_p = 1,
+    tools = null,
+  } = options;
+
+  try {
+    const input = { messages, temperature, max_tokens, top_p };
+    if (tools && tools.length > 0) {
+      input.tools = tools;
+    }
+
+    const response = await ai.run(model, input);
+
+    return {
+      content: response.response ?? null,
+      toolCalls: response.tool_calls || null,
+      usage: {
+        prompt_tokens: response.usage?.prompt_tokens || 0,
+        completion_tokens: response.usage?.completion_tokens || 0,
+        total_tokens: response.usage?.total_tokens || 0,
+      },
+    };
+  } catch (error) {
+    throw new Error(`AI model error: ${error.message}`);
+  }
+}
+
 function sseLine(data) {
   return `data: ${JSON.stringify(data)}\n\n`;
 }
@@ -241,6 +282,16 @@ export function getAvailableModels() {
       },
       {
         id: "@cf/mistral/mistral-7b-instruct-v0.1",
+        object: "model",
+        owned_by: "cloudflare",
+        permission: [],
+      },
+      {
+        // The only model in this catalog with confirmed tool/function-calling
+        // support (docs/specs/agent-tool-calling.md) -- agents that declare
+        // `tools` need this model (or another one added here with the same
+        // support) to actually get structured tool_calls back from ai.run().
+        id: "@cf/meta/llama-3.1-8b-instruct",
         object: "model",
         owned_by: "cloudflare",
         permission: [],

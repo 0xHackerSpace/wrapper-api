@@ -3,11 +3,13 @@ import { json, badRequest, notFound, internalError, conflict } from "./lib/respo
 import {
   chatCompletion,
   chatCompletionStream,
+  chatCompletionWithTools,
   createChatCompletionChunkStream,
   getAvailableModels,
   validateChatCompletionRequest,
   ValidationError,
 } from "./lib/ai.mjs";
+import { TOOL_CATALOG, getToolDefinitions } from "./lib/tools.mjs";
 import { requirePermission, AuthError } from "./lib/auth.mjs";
 import {
   createSession,
@@ -39,6 +41,10 @@ import {
 } from "./lib/agent-db.mjs";
 
 const TITLE_MAX_LENGTH = 50;
+// docs/specs/agent-tool-calling.md: fallback used only when a session's agent
+// snapshot predates the max_tool_iterations column (agent-db.mjs already
+// defaults it at agent creation/update time, so this should be rare).
+const DEFAULT_MAX_TOOL_ITERATIONS = 5;
 
 export default class extends WorkerEntrypoint {
   async fetch(request) {
@@ -280,6 +286,8 @@ async function handleCreateSession(request, env) {
       temperature: agent.temperature,
       maxTokens: agent.max_tokens,
       topP: agent.top_p,
+      tools: agent.tools,
+      maxToolIterations: agent.max_tool_iterations,
     };
   }
 
@@ -404,6 +412,21 @@ async function handleSendMessage(request, env, sessionId) {
   }
   const aiOptions = buildAiOptions(agentConfig, model);
 
+  // docs/specs/agent-tool-calling.md: a session's agent snapshot carrying a
+  // non-empty `tools` list runs through the tool-calling loop instead of the
+  // plain chatCompletion()/chatCompletionStream() path below. No tools (or no
+  // agent at all) means this branch is never taken -- zero behavior change.
+  const toolNames = agentConfig?.tools;
+  if (Array.isArray(toolNames) && toolNames.length > 0) {
+    return await handleToolCallingSendMessage(env, sessionId, modelMessages, {
+      aiOptions,
+      toolNames,
+      maxIterations: agentConfig.maxToolIterations ?? DEFAULT_MAX_TOOL_ITERATIONS,
+      userContent: content,
+      stream: stream === true,
+    });
+  }
+
   if (stream === true) {
     return await streamSendMessageResponse(env, sessionId, modelMessages, { aiOptions, userContent: content });
   }
@@ -466,6 +489,102 @@ async function streamSendMessageResponse(env, sessionId, modelMessages, { aiOpti
     status: 200,
     headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" },
   });
+}
+
+// docs/specs/agent-tool-calling.md, "Loop de tool calling" + "Streaming: só a
+// resposta final": drives the loop to a final answer (always non-streaming
+// internally, since each round needs the structured tool_calls field), then
+// either persists+returns it as JSON (stream !== true) or replays the exact
+// same final prompt through the existing chatCompletionStream()/
+// createChatCompletionChunkStream() path with stream: true -- accepting one
+// extra model call as the documented trade-off, rather than trying to stream
+// the intermediate tool-calling rounds themselves (out of scope, see
+// agent-tool-calling-out-of-scope.md).
+async function handleToolCallingSendMessage(env, sessionId, modelMessages, { aiOptions, toolNames, maxIterations, userContent, stream }) {
+  const { result, messagesForFinalCall } = await runToolCallingLoop(env, sessionId, modelMessages, {
+    ...aiOptions,
+    toolNames,
+    maxIterations,
+  });
+
+  if (stream) {
+    return await streamSendMessageResponse(env, sessionId, messagesForFinalCall, { aiOptions, userContent });
+  }
+
+  const assistantContent = result.content;
+
+  await addMessage(env.CHAT_DB, { sessionId, role: "assistant", content: assistantContent });
+  await touchSession(env.CHAT_DB, sessionId, { title: userContent.slice(0, TITLE_MAX_LENGTH) });
+
+  return json({
+    session_id: sessionId,
+    message: { role: "assistant", content: assistantContent },
+    usage: result.usage,
+  });
+}
+
+// Model -> tool -> model cycle (docs/specs/agent-tool-calling.md). Each round
+// calls chatCompletionWithTools() -- which, unlike chatCompletion(), preserves
+// the native "system"/"tool" roles Workers AI's function calling requires
+// instead of running them through normalizeMessages(). `tools` is only ever
+// passed while the iteration budget isn't exhausted (`cycle < maxIterations`):
+// once it is, one last call is made *without* tools, forcing a text answer
+// (spec step 4) -- its result is treated as final unconditionally, even if
+// the model still tries to call a tool (unverified Workers AI behavior, see
+// spec's "Casos a verificar"). Every intermediate assistant (tool-call
+// request) and tool (result) message is persisted via addMessage() so the
+// full exchange survives in chat_messages, same as the eventual final reply.
+// Returns the exact message array that produced the final result too, so a
+// streaming caller can replay the identical prompt with stream: true.
+async function runToolCallingLoop(env, sessionId, initialMessages, { model, temperature, max_tokens, top_p, toolNames, maxIterations }) {
+  const toolDefinitions = getToolDefinitions(toolNames);
+  let messages = [...initialMessages];
+  let cycle = 0;
+
+  while (true) {
+    const useTools = cycle < maxIterations;
+
+    const result = await chatCompletionWithTools(env.AI, messages, {
+      model,
+      temperature,
+      max_tokens,
+      top_p,
+      tools: useTools ? toolDefinitions : null,
+    });
+
+    if (!useTools || !result.toolCalls || result.toolCalls.length === 0) {
+      return { result, messagesForFinalCall: messages };
+    }
+
+    await addMessage(env.CHAT_DB, {
+      sessionId,
+      role: "assistant",
+      content: JSON.stringify({ tool_calls: result.toolCalls }),
+    });
+    messages = [...messages, { role: "assistant", content: result.content ?? "", tool_calls: result.toolCalls }];
+
+    for (const toolCall of result.toolCalls) {
+      const { name } = toolCall;
+      const args = toolCall.arguments || {};
+      const tool = TOOL_CATALOG[name];
+
+      // A failing tool (unknown name, RPC error, missing binding) never
+      // aborts the request -- it becomes an error result fed back to the
+      // model as a normal tool message, and the loop continues.
+      let toolResultContent;
+      try {
+        if (!tool) throw new Error(`Unknown tool: ${name}`);
+        toolResultContent = JSON.stringify(await tool.execute(env, args));
+      } catch (error) {
+        toolResultContent = JSON.stringify({ error: error.message });
+      }
+
+      await addMessage(env.CHAT_DB, { sessionId, role: "tool", content: toolResultContent });
+      messages = [...messages, { role: "tool", name, content: toolResultContent }];
+    }
+
+    cycle += 1;
+  }
 }
 
 async function handleListMessages(request, env, sessionId, url) {
