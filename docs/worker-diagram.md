@@ -38,6 +38,7 @@ flowchart LR
     rag -.->|RPC: GRAPH_WORKER| graphw
     rag -.->|RPC: AI_WORKER| ai
     ai -.->|RPC: RAG_WORKER| rag
+    ai -.->|RPC: GRAPH_WORKER| graphw
     graphrag -.->|RPC: RAG_WORKER| rag
     graphrag -.->|RPC: GRAPH_WORKER| graphw
     graphrag -.->|RPC: AI_WORKER| ai
@@ -51,7 +52,7 @@ Legenda: seta sólida = binding direto de dados (D1/R2/Vectorize/Workers AI); se
 |---|---|---|---|
 | `api` | D1 `dev-ingredient` (`INGREDIENTS_DB`) | → `graph` (`GRAPH_WORKER`) | sim |
 | `auth` | D1 `dev-auth` (`DB`) | — | sim |
-| `ai` | Workers AI (`AI`), D1 `dev-chat` (`CHAT_DB`), D1 `dev-agents` (`AGENTS_DB`) | expõe `chat()` para outros workers; → `rag` (`RAG_WORKER`, ver [ADR 0023](decisions/0023-agent-tool-calling.md)) | sim |
+| `ai` | Workers AI (`AI`), D1 `dev-chat` (`CHAT_DB`), D1 `dev-agents` (`AGENTS_DB`) | expõe `chat()` para outros workers; → `rag` (`RAG_WORKER`, ver [ADR 0023](decisions/0023-agent-tool-calling.md)), → `graph` (`GRAPH_WORKER`, ver [ADR 0024](decisions/0024-agent-graph-tool.md)) | sim |
 | `graph` | D1 `dev-graph` (`GRAPH_DB`) | expõe `upsertNode`/`updateNode`/`deleteNode`/`createEdge`/`getNeighbors`/`findPaths`/`findNodeByLabel` | sim |
 | `rag` | Workers AI (`AI`), Vectorize (`VECTORIZE`), R2 (`DOCUMENTS`) | → `graph` (`GRAPH_WORKER`), → `ai` (`AI_WORKER`) | **não** (ver nota) |
 | `graphrag` | nenhum (orquestrador puro, sem D1/R2/Vectorize próprio) | → `rag` (`RAG_WORKER`), → `graph` (`GRAPH_WORKER`), → `ai` (`AI_WORKER`) | sim |
@@ -65,4 +66,5 @@ Legenda: seta sólida = binding direto de dados (D1/R2/Vectorize/Workers AI); se
 - Chamadas RPC ao `graph-worker` passam um `actorSub` explícito (ex.: `svc-api-ingredients`, `svc-rag-enrichment`, ver [ADR 0016](decisions/0016-domain-graph-service-accounts-and-fire-and-forget-enrichment.md)) e checam só o papel desse actor em `graph_access` — não repetem a permission RBAC `graph:read`/`graph:write`, que fica exclusiva do caminho HTTP.
 - `graphrag-worker` é puramente um orquestrador: não tem D1, R2 ou Vectorize próprios, só agrega as respostas de `rag`, `graph` e `ai` via RPC.
 - **`ai-worker` → `rag-worker` (`RAG_WORKER`)** é o primeiro Service Binding do `ai-worker` — usado só pela tool `query_knowledge_base` no loop de tool calling de agents ([ADR 0023](decisions/0023-agent-tool-calling.md)), chamado com uma sessão que tenha um agent com `tools` habilitado.
+- **`ai-worker` → `graph-worker` (`GRAPH_WORKER`)** foi adicionado pela [ADR 0024](decisions/0024-agent-graph-tool.md) — usado só pela tool `find_node`, chamada com o `graph_id` snapshotado no agent da sessão e o `sub` do usuário real como `actorSub` (nunca um service account).
 - Service Bindings são só alcançáveis dentro da mesma conta Cloudflare — não passam pela borda HTTP pública, então não sofrem o enforcement de permission RBAC do JWT (que é exclusivo das rotas HTTP de cada worker).

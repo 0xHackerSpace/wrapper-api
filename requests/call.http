@@ -405,6 +405,24 @@ Authorization: Bearer {{jwtToken}}
   "max_tool_iterations": 5
 }
 
+### Create an agent with the find_node tool enabled (docs/decisions/0024-agent-graph-tool.md) -- graph_id
+### is not validated at registration time (no existence/access check); find_node does an exact
+### (type, label) lookup in that graph at runtime, using the real sending user's sub as actorSub
+### for the graph-worker's ACL check (403 from graph-worker becomes a tool error, not a failed request)
+POST {{baseUrlAI}}/v1/agents
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "name": "Assistente com busca no grafo de conhecimento",
+  "system_prompt": "Você é um assistente que consulta o grafo de conhecimento para encontrar nodes específicos (ex.: ingredientes, receitas) antes de responder, sempre em português.",
+  "model": "@cf/meta/llama-3.1-8b-instruct",
+  "temperature": 0.7,
+  "tools": ["find_node"],
+  "max_tool_iterations": 5,
+  "graph_id": "ingredients"
+}
+
 ### List agents the authenticated user has agent_access to, paginated (ordered by updated_at desc)
 GET {{baseUrlAI}}/v1/agents?limit=20
 Authorization: Bearer {{jwtToken}}
