@@ -36,8 +36,4 @@ Não existe conceito de agent visível para todos os usuários por padrão (tipo
 
 ## Exposição via RPC (Service Binding)
 
-Nenhum outro worker pode criar, ler ou usar agents via RPC — a feature é exclusiva do caminho HTTP público do `ai-worker`, mesma decisão já registrada para sessões de chat (ver [chat-session-rpc-exposure.md](chat-session-rpc-exposure.md)).
-
-**Por quê**: mesmo raciocínio — não existe hoje nenhum consumidor interno concreto que precise disso via RPC.
-
-**Quando revisitar**: mesmo trigger já documentado para sessões — se `graphrag-worker` (ou outro) precisar orquestrar agents entre chamadas internas.
+**Decisão registrada** — ver [agent-registration-rpc-exposure.md](agent-registration-rpc-exposure.md). Nenhum outro worker pode criar, ler ou usar agents via RPC — a feature é exclusiva do caminho HTTP público do `ai-worker`, mesma decisão já tomada para sessões de chat (ver [chat-session-rpc-exposure.md](chat-session-rpc-exposure.md)).
