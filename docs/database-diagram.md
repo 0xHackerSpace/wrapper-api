@@ -152,7 +152,7 @@ Notas:
 
 ## dev-chat
 
-Sessões de chat do `ai-worker`, isoladas do fluxo stateless de `/v1/chat/completions` ([ADR 0019](decisions/0019-ai-worker-chat-sessions.md)), com ACL por sessão a partir da [ADR 0020](decisions/0020-chat-session-sharing-and-pagination.md) e colunas de snapshot de agent a partir da [ADR 0022](decisions/0022-agent-registration.md), [ADR 0023](decisions/0023-agent-tool-calling.md) e [ADR 0024](decisions/0024-agent-graph-tool.md). Migrations: 0014, 0015, 0018, 0020, 0022.
+Sessões de chat do `ai-worker`, isoladas do fluxo stateless de `/v1/chat/completions` ([ADR 0019](decisions/0019-ai-worker-chat-sessions.md)), com ACL por sessão a partir da [ADR 0020](decisions/0020-chat-session-sharing-and-pagination.md), colunas de snapshot de agent a partir da [ADR 0022](decisions/0022-agent-registration.md), [ADR 0023](decisions/0023-agent-tool-calling.md) e [ADR 0024](decisions/0024-agent-graph-tool.md), e suporte a teams a partir da [ADR 0025](decisions/0025-agent-teams.md). Migrations: 0014, 0015, 0018, 0020, 0022, 0025.
 
 ```mermaid
 erDiagram
@@ -172,6 +172,7 @@ erDiagram
         text agent_tools "snapshot congelado na criacao, JSON array"
         integer agent_max_tool_iterations "snapshot congelado na criacao"
         text agent_graph_id "snapshot congelado na criacao, logico, sem FK cross-database"
+        text team_id "logico, dev-agents.agent_teams.id, sem FK cross-database, referencia viva (sem snapshot)"
         datetime created_at
         datetime updated_at
     }
@@ -181,6 +182,7 @@ erDiagram
         text session_id FK
         text role "user | assistant"
         text content
+        text agent_id "logico, dev-agents.agents.id, sem FK cross-database, qual membro do team gerou a mensagem"
         datetime created_at
     }
 
@@ -198,15 +200,21 @@ Notas:
 - `chat_sessions.user_id` não tem FK física para `dev-auth.users` (D1s são isolados) e, desde a migration 0015, deixou de ser a fonte de autorização — é só metadado histórico de quem criou a sessão. Toda checagem de acesso passa por `chat_access`.
 - `chat_access` é a ACL por sessão (`UNIQUE(session_id, user_id)`), mesmo modelo de `graph_access` ([ADR 0012](decisions/0012-graph-worker-knowledge-graph.md)): papéis `owner`/`editor`/`viewer`, com a invariante de que toda sessão deve manter ao menos um `owner` (aplicada em `chat-db.mjs`, não pelo schema — ver [ADR 0020](decisions/0020-chat-session-sharing-and-pagination.md)). A migration 0015 faz backfill de uma linha `owner` para cada sessão já existente antes dela.
 - `agent_id` e as oito colunas `agent_*` (migrations 0018, 0020 e 0022) são todas nullable e sem `FOREIGN KEY` — `dev-agents` é um D1 separado e D1/SQLite não suporta FK cross-database. Preenchidas apenas quando a sessão é criada com um `agent_id` no corpo; ficam `null` caso contrário. `agent_tools`/`agent_max_tool_iterations` (migration 0020) ficam `null` também quando o agent referenciado não declara `tools`; `agent_graph_id` (migration 0022) fica `null` quando o agent referenciado não declara `graph_id`. Uma vez copiado, o snapshot nunca é atualizado a partir de `dev-agents` novamente ([ADR 0022](decisions/0022-agent-registration.md), [ADR 0023](decisions/0023-agent-tool-calling.md), [ADR 0024](decisions/0024-agent-graph-tool.md)).
+- `team_id` (migration 0025, [ADR 0025](decisions/0025-agent-teams.md)) é nullable, sem `FOREIGN KEY` (mesma razão cross-database) e **mutuamente exclusivo com `agent_id`** (validado na aplicação, `400` se ambos forem enviados em `POST /v1/sessions`). Diferente de `agent_id`, não é um snapshot: é uma referência viva a `dev-agents.agent_teams.id`, então editar o team depois de criada a sessão afeta a próxima mensagem enviada nela.
+- `chat_messages.agent_id` (migration 0025, [ADR 0025](decisions/0025-agent-teams.md)) é nullable, sem `FOREIGN KEY`, e marca qual agent (membro de um team) produziu aquela mensagem durante uma orquestração; `null` para mensagens de sessão com agent único ou sem agent (comportamento anterior a esta migration, inalterado).
 - Índices em `chat_sessions.user_id`, `chat_messages.session_id` e `chat_access.user_id`.
 
 ## dev-agents
 
-Agents (configuração de IA reutilizável) do `ai-worker`, exclusivo desse worker ([ADR 0022](decisions/0022-agent-registration.md)), com `tools`/`max_tool_iterations` a partir da [ADR 0023](decisions/0023-agent-tool-calling.md) e `graph_id` a partir da [ADR 0024](decisions/0024-agent-graph-tool.md). Migrations: 0016, 0019, 0021.
+Agents (configuração de IA reutilizável) do `ai-worker`, exclusivo desse worker ([ADR 0022](decisions/0022-agent-registration.md)), com `tools`/`max_tool_iterations` a partir da [ADR 0023](decisions/0023-agent-tool-calling.md), `graph_id` a partir da [ADR 0024](decisions/0024-agent-graph-tool.md), e `agent_teams`/`team_members`/`team_access` a partir da [ADR 0025](decisions/0025-agent-teams.md). Migrations: 0016, 0019, 0021, 0023.
 
 ```mermaid
 erDiagram
     agents ||--o{ agent_access : "controla acesso via"
+    agents ||--o{ team_members : "e membro via"
+    agent_teams ||--o{ team_members : "agrupa"
+    agent_teams ||--o{ team_access : "controla acesso via"
+    agents ||--o| agent_teams : "lidera (lead_agent_id)"
 
     agents {
         text id PK
@@ -230,6 +238,33 @@ erDiagram
         text role "owner | editor | viewer"
         datetime created_at
     }
+
+    agent_teams {
+        text id PK
+        text name
+        text orchestration_mode "pipeline | debate | orchestrator"
+        text lead_agent_id "FK agents(id), nullable"
+        integer rounds "nullable, obrigatorio em debate"
+        text termination_strategy "nullable, fixed_rounds | moderator, so em debate"
+        integer max_orchestrator_steps "nullable, default 10 em orchestrator"
+        datetime created_at
+        datetime updated_at
+    }
+
+    team_members {
+        text id PK
+        text team_id FK
+        text agent_id "FK agents(id), referencia viva"
+        integer order_index
+    }
+
+    team_access {
+        text id PK
+        text team_id FK
+        text user_id "logico, dev-auth.users.id"
+        text role "owner | editor | viewer"
+        datetime created_at
+    }
 ```
 
 Notas:
@@ -239,6 +274,7 @@ Notas:
 - `agent_access` é a ACL por agent (`UNIQUE(agent_id, user_id)`), mesmo modelo de `chat_access`/`graph_access`: papéis `owner`/`editor`/`viewer`, com a invariante de que todo agent deve manter ao menos um `owner` (aplicada em `agent-db.mjs`, não pelo schema).
 - Índice em `agent_access.user_id` (listar "meus agents" via join, usado por `listAgentsForUser`).
 - Sem relação física com `dev-chat.chat_sessions.agent_id` — ver nota da seção `dev-chat` acima.
+- `agent_teams`/`team_members`/`team_access` (migration 0023, [ADR 0025](decisions/0025-agent-teams.md)): diferente das colunas `agent_*` de `dev-chat`, `team_members.agent_id` é uma **referência viva com FK real** (`agents(id)`, mesmo D1) — possível porque teams vivem no mesmo banco dos agents, não em `dev-chat`. `UNIQUE(team_id, agent_id)` impede membro duplicado no mesmo team. `lead_agent_id` (nullable) referencia `agents(id)`, obrigatório em `debate`/`orchestrator`, proibido em `pipeline`, e sempre precisa estar entre os `team_members` do próprio team (validado na aplicação, não pelo schema). `team_access` segue exatamente o mesmo modelo de `agent_access`/`chat_access`/`graph_access` (`UNIQUE(team_id, user_id)`, invariante de ≥1 owner). `team_members.team_id` e `team_access.team_id` são `ON DELETE CASCADE` a partir de `agent_teams`; apagar um team nunca apaga os agents membros.
 
 ## Relações lógicas entre bancos (sem FK física)
 
@@ -251,6 +287,8 @@ erDiagram
     users ||--o{ chat_access : "user_id (logico)"
     users ||--o{ agent_access : "user_id (logico)"
     agents ||--o| chat_sessions : "agent_id (logico, cross-database)"
+    agent_teams ||--o| chat_sessions : "team_id (logico, cross-database, referencia viva)"
+    agents ||--o{ chat_messages : "agent_id (logico, cross-database, qual membro gerou a mensagem)"
 ```
 
 `rag-worker` (Vectorize, fora do D1) e `graphrag-worker` (orquestrador sem estado próprio) não possuem tabelas — não aparecem nos diagramas acima. `dev-chat` e `dev-agents` são exclusivos do `ai-worker` — nenhum outro worker acessa essas tabelas, diretamente ou via RPC.

@@ -166,6 +166,15 @@ components:
           format: uuid
           nullable: true
           description: Agent referenciado na criacao da sessao (ADR 0022), se algum. Config congelada em snapshot, nao exposta aqui.
+        team_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            Team referenciado na criacao da sessao (ADR 0025), se algum. Mutuamente
+            exclusivo com `agent_id`. Diferente de `agent_id`, e uma referencia viva,
+            sem snapshot: editar o team depois afeta a proxima mensagem enviada nesta
+            sessao.
         created_at:
           type: string
         updated_at:
@@ -188,6 +197,14 @@ components:
           enum: [user, assistant]
         content:
           type: string
+        agent_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            Qual membro do team (ADR 0025) produziu esta mensagem, quando ela vem de
+            dentro de uma orquestracao de team. `null` para mensagens de sessao com
+            agent unico ou sem agent.
         created_at:
           type: string
       required: [id, session_id, role, content, created_at]
@@ -318,9 +335,153 @@ components:
           type: string
           nullable: true
           description: Grafo usado pela tool `find_node` (ADR 0024); nao validado na edicao.
+    TeamMember:
+      type: object
+      description: Um membro de team (ADR 0025) -- referencia viva a um agent, nao um snapshot.
+      properties:
+        agent_id:
+          type: string
+          format: uuid
+        order_index:
+          type: integer
+          description: Ordem no pipeline/rodadas do debate; preenchido (mas ignorado para sequenciamento) em orchestrator.
+      required: [agent_id, order_index]
+    Team:
+      type: object
+      description: |
+        Agrupa multiplos agents e os coordena em um dos 3 modos de orquestracao
+        (ADR 0025): `pipeline` (cadeia sequencial), `debate` (todos discutem, N
+        rodadas) ou `orchestrator` (um coordenador decide quem fala a seguir via a
+        tool sintetica `select_next_agent`). `team_members.agent_id` e uma
+        referencia viva (FK real, mesmo D1 `dev-agents`) -- o team sempre executa
+        com a config atual de seus membros, sem snapshot. Pode ser referenciado por
+        `team_id` ao criar uma sessao de chat (mutuamente exclusivo com `agent_id`).
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        orchestration_mode:
+          type: string
+          enum: [pipeline, debate, orchestrator]
+        lead_agent_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            Obrigatorio para `debate` (sintetizador/moderador) e `orchestrator`
+            (coordenador); proibido em `pipeline`. Precisa ser um dos `members`.
+        rounds:
+          type: integer
+          nullable: true
+          description: Obrigatorio (teto maximo de seguranca) para `debate`; proibido nos demais modos.
+        termination_strategy:
+          type: string
+          nullable: true
+          enum: [fixed_rounds, moderator]
+          description: Obrigatorio para `debate`; proibido nos demais modos.
+        max_orchestrator_steps:
+          type: integer
+          nullable: true
+          description: Teto de seguranca para `orchestrator`. Default 10 quando omitido nesse modo; proibido nos demais.
+        members:
+          type: array
+          items:
+            $ref: "#/components/schemas/TeamMember"
+          description: Lista ordenada de membros. Presente no detalhe (GET /v1/teams/{id}); omitida na listagem.
+        created_at:
+          type: string
+        updated_at:
+          type: string
+        role:
+          type: string
+          enum: [owner, editor, viewer]
+      required: [id, name, orchestration_mode, created_at, updated_at]
+    TeamInput:
+      type: object
+      description: |
+        Campos obrigatorios variam por `orchestration_mode` -- ver ADR 0025:
+        `pipeline` nao aceita `lead_agent_id`/`rounds`/`termination_strategy`/
+        `max_orchestrator_steps` (400 se enviados); `debate` exige `lead_agent_id`
+        + `rounds` + `termination_strategy`; `orchestrator` exige `lead_agent_id`
+        (`max_orchestrator_steps` default 10 se omitido). `lead_agent_id` sempre
+        precisa estar em `members`.
+      properties:
+        name:
+          type: string
+        orchestration_mode:
+          type: string
+          enum: [pipeline, debate, orchestrator]
+        members:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            properties:
+              agent_id:
+                type: string
+                format: uuid
+              order_index:
+                type: integer
+                description: Opcional; default e a posicao do item no array.
+            required: [agent_id]
+        lead_agent_id:
+          type: string
+          format: uuid
+          description: Obrigatorio para debate/orchestrator; proibido em pipeline.
+        rounds:
+          type: integer
+          description: Obrigatorio para debate (teto maximo); proibido nos demais modos.
+        termination_strategy:
+          type: string
+          enum: [fixed_rounds, moderator]
+          description: Obrigatorio para debate; proibido nos demais modos.
+        max_orchestrator_steps:
+          type: integer
+          description: Opcional para orchestrator, default 10; proibido nos demais modos.
+      required: [name, orchestration_mode, members]
+    TeamUpdateInput:
+      type: object
+      description: |
+        Todos os campos sao opcionais; apenas os enviados sao atualizados. Enviar
+        `members` substitui a lista inteira (nao ha rota para editar um membro
+        individualmente). O resultado mesclado (campos existentes + atualizacoes) e
+        revalidado pelas mesmas regras por modo de `TeamInput`.
+      properties:
+        name:
+          type: string
+        orchestration_mode:
+          type: string
+          enum: [pipeline, debate, orchestrator]
+        members:
+          type: array
+          items:
+            type: object
+            properties:
+              agent_id:
+                type: string
+                format: uuid
+              order_index:
+                type: integer
+            required: [agent_id]
+        lead_agent_id:
+          type: string
+          format: uuid
+          nullable: true
+        rounds:
+          type: integer
+          nullable: true
+        termination_strategy:
+          type: string
+          nullable: true
+          enum: [fixed_rounds, moderator]
+        max_orchestrator_steps:
+          type: integer
+          nullable: true
     AccessEntry:
       type: object
-      description: Linha de ACL (chat_access, agent_access ou graph_access), papel owner/editor/viewer.
+      description: Linha de ACL (chat_access, agent_access, graph_access ou team_access), papel owner/editor/viewer.
       properties:
         user_id:
           type: string
@@ -1264,14 +1425,22 @@ paths:
   /v1/sessions:
     post:
       operationId: postV1Sessions
-      summary: Cria uma sessao de chat, opcionalmente a partir de um agent
+      summary: Cria uma sessao de chat, opcionalmente a partir de um agent ou de um team
       description: |
         Requer JWT + permission `ai:chat`. O criador vira `owner` da sessao. Corpo
         opcional com `agent_id`: requer papel `viewer`+ em `agent_access` para aquele
         agent (404 se inexistente ou sem acesso) e copia seu `system_prompt`/`model`/
-        `temperature`/`max_tokens`/`top_p` como snapshot congelado na sessao (ADR
-        0022) -- editar ou apagar o agent depois nao afeta a sessao ja criada. Sem
-        `agent_id`, comportamento inalterado.
+        `temperature`/`max_tokens`/`top_p`/`tools`/`max_tool_iterations`/`graph_id`
+        como snapshot congelado na sessao (ADR 0022/0023/0024) -- editar ou apagar o
+        agent depois nao afeta a sessao ja criada.
+
+        Alternativamente, corpo opcional com `team_id` (ADR 0025): requer papel
+        `viewer`+ em `team_access` para aquele team (404 se inexistente ou sem
+        acesso), mas **sem snapshot** -- `team_id` e gravado como referencia viva, e
+        a sessao sempre executa com a config atual do team (membros, modo de
+        orquestracao) na proxima mensagem enviada. `agent_id` e `team_id` sao
+        **mutuamente exclusivos**: enviar os dois retorna `400`. Sem nenhum dos
+        dois, comportamento inalterado.
       tags: [ai]
       security:
         - bearerAuth: []
@@ -1285,15 +1454,22 @@ paths:
                 agent_id:
                   type: string
                   format: uuid
+                team_id:
+                  type: string
+                  format: uuid
               example: {}
             examples:
               vazia:
-                summary: Sessao sem agent
+                summary: Sessao sem agent nem team
                 value: {}
               com_agent:
-                summary: Sessao a partir de um agent
+                summary: Sessao a partir de um agent (snapshot congelado)
                 value:
                   agent_id: "8f14e45f-ceea-467e-b91a-fbc86eb1cec6"
+              com_team:
+                summary: Sessao a partir de um team (referencia viva, sem snapshot)
+                value:
+                  team_id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
       responses:
         "201":
           description: Sessao criada.
@@ -1305,9 +1481,18 @@ paths:
                   id: { type: string, format: uuid }
                   title: { type: string, nullable: true, example: null }
                   agent_id: { type: string, format: uuid, nullable: true }
+                  team_id: { type: string, format: uuid, nullable: true }
                   created_at: { type: string }
+        "400":
+          description: "`agent_id` e `team_id` enviados ao mesmo tempo (mutuamente exclusivos)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: { message: "agent_id and team_id are mutually exclusive", type: invalid_request_error }
         "404":
-          description: "`agent_id` informado, mas inexistente ou sem `agent_access`."
+          description: "`agent_id` ou `team_id` informado, mas inexistente ou sem acesso (`agent_access`/`team_access`)."
           content:
             application/json:
               schema:
@@ -2006,6 +2191,342 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "409":
           description: A remocao deixaria o agent sem nenhum owner.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/teams:
+    post:
+      operationId: postV1Teams
+      summary: Cria um team
+      description: |
+        Requer JWT + permission `ai:teams`. O criador vira `owner` do team. Campos
+        obrigatorios/proibidos variam por `orchestration_mode` -- ver
+        `TeamInput` e ADR 0025. `lead_agent_id` sempre precisa estar em `members`.
+      tags: [ai]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TeamInput"
+            examples:
+              pipeline:
+                summary: Team pipeline (cadeia sequencial)
+                value:
+                  name: "Pipeline de revisao de receitas"
+                  orchestration_mode: pipeline
+                  members:
+                    - agent_id: "8f14e45f-ceea-467e-b91a-fbc86eb1cec6"
+                      order_index: 0
+              debate:
+                summary: Team debate (discussao em rodadas)
+                value:
+                  name: "Debate de receitas"
+                  orchestration_mode: debate
+                  members:
+                    - agent_id: "8f14e45f-ceea-467e-b91a-fbc86eb1cec6"
+                      order_index: 0
+                  lead_agent_id: "8f14e45f-ceea-467e-b91a-fbc86eb1cec6"
+                  rounds: 3
+                  termination_strategy: moderator
+              orchestrator:
+                summary: Team orchestrator (coordenador dirige quem fala)
+                value:
+                  name: "Coordenador de receitas"
+                  orchestration_mode: orchestrator
+                  members:
+                    - agent_id: "8f14e45f-ceea-467e-b91a-fbc86eb1cec6"
+                      order_index: 0
+                  lead_agent_id: "8f14e45f-ceea-467e-b91a-fbc86eb1cec6"
+                  max_orchestrator_steps: 10
+      responses:
+        "201":
+          description: Team criado.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Team"
+        "400":
+          description: Campo obrigatorio ausente/invalido para o `orchestration_mode` enviado, ou `lead_agent_id` fora de `members`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: JWT sem a permission `ai:teams`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    get:
+      operationId: getV1Teams
+      summary: Lista teams do usuario autenticado
+      description: |
+        Requer JWT + permission `ai:teams`. Lista teams onde o usuario tem qualquer
+        papel em `team_access` (owner/editor/viewer), ordenados por `updated_at`
+        desc. Paginacao por cursor opaco (keyset), mesmo formato de `GET /v1/agents`.
+        `members` nao e incluido na listagem (so no detalhe, `GET /v1/teams/{id}`).
+      tags: [ai]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Pagina de teams.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object: { type: string, example: list }
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Team"
+                  next_cursor:
+                    type: string
+                    nullable: true
+  /v1/teams/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getV1TeamById
+      summary: Detalhe de um team
+      description: |
+        Requer JWT + permission `ai:teams`. Papel minimo: `viewer`. Inclui a lista
+        ordenada de `members`. 404 quando o team nao existe OU quando o usuario nao
+        tem `team_access` a ele (para nao vazar a existencia do id).
+      tags: [ai]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Team encontrado.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Team"
+        "404":
+          description: Team inexistente ou sem team_access.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: { message: "Team not found", type: invalid_request_error }
+    patch:
+      operationId: patchV1TeamById
+      summary: Edita um team
+      description: |
+        Requer JWT + permission `ai:teams`. Papel minimo: `editor`. Enviar `members`
+        substitui a lista inteira (nao ha rota para editar um membro individual). O
+        resultado mesclado e revalidado pelas mesmas regras por `orchestration_mode`
+        de `POST /v1/teams` -- inclui rejeitar remover da lista o `agent_id` que e o
+        `lead_agent_id` atual sem troca-lo no mesmo `PATCH`.
+      tags: [ai]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TeamUpdateInput"
+            example:
+              rounds: 5
+      responses:
+        "200":
+          description: Team atualizado.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Team"
+        "400":
+          description: Campo invalido para o modo atual/novo, ou remocao do lead_agent_id atual sem substitui-lo.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: "Papel insuficiente (ex. `viewer` tentando editar) -- 403, nao 404."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Team inexistente ou sem team_access.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    delete:
+      operationId: deleteV1TeamById
+      summary: Remove um team
+      description: |
+        Requer JWT + permission `ai:teams`. Papel minimo: `owner`. Cascateia para
+        `team_members` e `team_access` (ON DELETE CASCADE). Nao apaga os agents
+        membros.
+      tags: [ai]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Team removido.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+        "403":
+          description: "Papel insuficiente (ex. `editor` tentando apagar) -- 403, nao 404."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Team inexistente ou sem team_access.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/teams/{id}/access:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getV1TeamAccess
+      summary: Lista colaboradores do team
+      description: "Requer JWT + permission `ai:teams`. Papel minimo: `viewer`."
+      tags: [ai]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Lista de colaboradores.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AccessEntry"
+                  count: { type: integer }
+        "404":
+          description: Team inexistente ou sem team_access.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/teams/{id}/access/{userId}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - name: userId
+        in: path
+        required: true
+        schema:
+          type: string
+    put:
+      operationId: putV1TeamAccessByUserId
+      summary: Concede ou atualiza o papel de um colaborador (upsert)
+      description: |
+        Requer JWT + permission `ai:teams`. Papel minimo: `owner`. Retorna 409 se a
+        operacao deixaria o team sem nenhum `owner`.
+      tags: [ai]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AccessRoleInput"
+            example:
+              role: editor
+      responses:
+        "200":
+          description: Acesso concedido/atualizado.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  data:
+                    $ref: "#/components/schemas/AccessEntry"
+        "404":
+          description: Team inexistente ou sem team_access.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: O team ficaria sem nenhum owner.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: { message: "Team must have at least one owner", type: invalid_request_error }
+    delete:
+      operationId: deleteV1TeamAccessByUserId
+      summary: Remove o acesso de um colaborador
+      description: |
+        Requer JWT + permission `ai:teams`. Requer papel `owner` quando removendo
+        outro usuario; auto-remocao (o proprio usuario) e permitida em qualquer
+        papel, sem checagem de owner.
+      tags: [ai]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Acesso removido.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+        "404":
+          description: Team ou acesso inexistente.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: A remocao deixaria o team sem nenhum owner.
           content:
             application/json:
               schema:
