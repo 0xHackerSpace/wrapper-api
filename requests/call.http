@@ -303,6 +303,20 @@ Authorization: Bearer {{jwtToken}}
   "stream": true
 }
 
+### Send a message in a session created with agent_id pointing at a tool-calling agent (see the
+### "Create an agent with tool calling enabled" example above). The response's `message.content`
+### is the final assistant answer, but the model->tool->model cycles it took to get there are also
+### persisted in chat_messages as extra role: "assistant" (tool_calls) / role: "tool" (result) rows --
+### visible via GET .../messages, invisible in this response. Works the same with stream: true, which
+### only re-streams the already-computed final answer (docs/decisions/0023-agent-tool-calling.md).
+POST {{baseUrlAI}}/v1/sessions/{{sessionId}}/messages
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "content": "O que a nossa base de conhecimento diz sobre substituir alho por alho em pó?"
+}
+
 ### List message history, paginated (ordered by created_at asc, requires viewer+)
 GET {{baseUrlAI}}/v1/sessions/{{sessionId}}/messages?limit=20
 Authorization: Bearer {{jwtToken}}
@@ -373,6 +387,22 @@ Authorization: Bearer {{jwtToken}}
   "model": "@cf/mistral/mistral-7b-instruct-v0.1",
   "temperature": 0.7,
   "max_tokens": 512
+}
+
+### Create an agent with tool calling enabled (docs/decisions/0023-agent-tool-calling.md) -- tools
+### is validated against the ai-worker's fixed tool catalog (400 for unknown names), and needs a
+### model with confirmed function-calling support (@cf/meta/llama-3.1-8b-instruct)
+POST {{baseUrlAI}}/v1/agents
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "name": "Assistente com busca na base de conhecimento",
+  "system_prompt": "Você é um assistente que consulta a base de conhecimento (RAG) sempre que precisar de informação factual antes de responder, sempre em português.",
+  "model": "@cf/meta/llama-3.1-8b-instruct",
+  "temperature": 0.7,
+  "tools": ["query_knowledge_base"],
+  "max_tool_iterations": 5
 }
 
 ### List agents the authenticated user has agent_access to, paginated (ordered by updated_at desc)

@@ -205,7 +205,9 @@ components:
       description: |
         Configuracao de IA reutilizavel (system prompt + parametros de geracao) --
         ver ADR 0022. Pode ser referenciada por `agent_id` ao criar uma sessao de
-        chat, que copia estes campos como um snapshot congelado.
+        chat, que copia estes campos como um snapshot congelado. `tools` e
+        `max_tool_iterations` (ADR 0023) habilitam tool calling nas mensagens de
+        sessoes que referenciam este agent -- ver `POST /v1/sessions/{id}/messages`.
       properties:
         id:
           type: string
@@ -225,6 +227,20 @@ components:
         top_p:
           type: number
           nullable: true
+        tools:
+          type: array
+          nullable: true
+          items:
+            type: string
+          description: |
+            Nomes de tools habilitadas (ex.: `["query_knowledge_base"]`), validados
+            contra o catalogo fixo de tools do ai-worker (ADR 0023). `null` ou
+            ausente significa nenhuma tool habilitada.
+          example: ["query_knowledge_base"]
+        max_tool_iterations:
+          type: integer
+          nullable: true
+          description: Teto de ciclos modelo->tool->modelo antes de forcar uma resposta final. Default 5.
         created_at:
           type: string
         updated_at:
@@ -248,6 +264,15 @@ components:
           type: integer
         top_p:
           type: number
+        tools:
+          type: array
+          nullable: true
+          items:
+            type: string
+          description: Opcional. Nomes devem existir no catalogo fixo de tools (ADR 0023); nome desconhecido retorna 400.
+        max_tool_iterations:
+          type: integer
+          description: Opcional. Default 5 quando omitido.
       required: [name, system_prompt, model]
     AgentUpdateInput:
       type: object
@@ -265,6 +290,14 @@ components:
           type: integer
         top_p:
           type: number
+        tools:
+          type: array
+          nullable: true
+          items:
+            type: string
+          description: Nomes devem existir no catalogo fixo de tools (ADR 0023); nome desconhecido retorna 400.
+        max_tool_iterations:
+          type: integer
     AccessEntry:
       type: object
       description: Linha de ACL (chat_access, agent_access ou graph_access), papel owner/editor/viewer.
@@ -1407,6 +1440,14 @@ paths:
         turno usuario+assistente; o titulo da sessao e preenchido automaticamente no
         primeiro envio. Quando `stream: true`, a resposta e SSE (`chat.completion.chunk`)
         e a mensagem do assistant so e persistida apos o streaming terminar com sucesso.
+        Quando a sessao referencia um agent com `tools` habilitado (ADR 0023), o envio
+        pode envolver um ou mais ciclos internos de tool calling (modelo -> tool ->
+        modelo, ate `max_tool_iterations`) antes da resposta final -- cada ciclo e
+        persistido como mensagens extras `role: "assistant"` (pedido de tool call) e
+        `role: "tool"` (resultado ou erro) no historico da sessao, visiveis via
+        `GET /v1/sessions/{id}/messages` mas nao inline nesta resposta. Isso funciona
+        tanto com `stream: true` quanto sem -- o loop roda sempre internamente sem
+        streaming, e so a resposta final e enviada como stream quando pedido.
       tags: [ai]
       security:
         - bearerAuth: []
@@ -1647,7 +1688,10 @@ paths:
     post:
       operationId: postV1Agents
       summary: Cadastra um agent
-      description: "Requer JWT + permission `ai:agents`. O criador vira `owner` do agent."
+      description: |
+        Requer JWT + permission `ai:agents`. O criador vira `owner` do agent.
+        `tools`, quando enviado, e validado contra o catalogo fixo de tools do
+        ai-worker (ADR 0023) -- nome desconhecido retorna 400.
       tags: [ai]
       security:
         - bearerAuth: []
@@ -1756,7 +1800,10 @@ paths:
     patch:
       operationId: patchV1AgentById
       summary: Edita um agent
-      description: "Requer JWT + permission `ai:agents`. Papel minimo: `editor`."
+      description: |
+        Requer JWT + permission `ai:agents`. Papel minimo: `editor`. `tools`,
+        quando enviado, e validado contra o catalogo fixo de tools do ai-worker
+        (ADR 0023) -- nome desconhecido retorna 400.
       tags: [ai]
       security:
         - bearerAuth: []
