@@ -124,9 +124,21 @@ function createChatDB(seedSessions = [], seedAccess = [], seedMessages = []) {
       },
       async run() {
         if (sql.startsWith("INSERT INTO chat_sessions")) {
-          const [id, userId] = boundArgs;
+          const [id, userId, agentId, agentSystemPrompt, agentModel, agentTemperature, agentMaxTokens, agentTopP] = boundArgs;
           const now = nextTimestamp();
-          sessions.push({ id, user_id: userId, title: null, created_at: now, updated_at: now });
+          sessions.push({
+            id,
+            user_id: userId,
+            title: null,
+            agent_id: agentId ?? null,
+            agent_system_prompt: agentSystemPrompt ?? null,
+            agent_model: agentModel ?? null,
+            agent_temperature: agentTemperature ?? null,
+            agent_max_tokens: agentMaxTokens ?? null,
+            agent_top_p: agentTopP ?? null,
+            created_at: now,
+            updated_at: now,
+          });
           return { success: true };
         }
         if (sql.startsWith("INSERT INTO chat_access")) {
@@ -207,7 +219,7 @@ function createChatDB(seedSessions = [], seedAccess = [], seedMessages = []) {
 function seedSession(db, { id = "s1", userId = "user-1", title = null, owners, editors = [], viewers = [] } = {}) {
   const ownerIds = owners || [userId];
   const createdAt = db._nextTimestamp();
-  db._sessions.push({ id, user_id: userId, title, created_at: createdAt, updated_at: createdAt });
+  db._sessions.push({ id, user_id: userId, title, agent_id: null, created_at: createdAt, updated_at: createdAt });
   for (const uid of ownerIds) {
     db._access.push({ id: `acc-${id}-${uid}`, session_id: id, user_id: uid, role: "owner", created_at: db._nextTimestamp() });
   }
@@ -220,9 +232,183 @@ function seedSession(db, { id = "s1", userId = "user-1", title = null, owners, e
   return id;
 }
 
+// In-memory mock of AGENTS_DB (dev-agents: agents + agent_access), same
+// substring-matching approach as createChatDB() above. agent_access mirrors
+// chat_access adapted to agents instead of sessions (docs/specs/agent-registration.md).
+function createAgentsDB(seedAgents = [], seedAccess = []) {
+  const agents = [...seedAgents];
+  const access = [...seedAccess];
+
+  let clock = 0;
+  function nextTimestamp() {
+    clock += 1;
+    return new Date(Date.UTC(2024, 0, 1, 0, 0, 0, clock)).toISOString();
+  }
+
+  function makeStatement(sql) {
+    let boundArgs = [];
+    return {
+      bind(...args) {
+        boundArgs = args;
+        return this;
+      },
+      async first() {
+        if (sql.includes("FROM agents") && sql.includes("WHERE id = ?")) {
+          const [id] = boundArgs;
+          return agents.find((a) => a.id === id) || null;
+        }
+        if (sql.includes("FROM agent_access") && sql.includes("WHERE agent_id = ? AND user_id = ?")) {
+          const [agentId, userId] = boundArgs;
+          return access.find((a) => a.agent_id === agentId && a.user_id === userId) || null;
+        }
+        return null;
+      },
+      async all() {
+        if (sql.includes("FROM agents a") && sql.includes("JOIN agent_access aa")) {
+          const hasCursor = sql.includes("a.updated_at <");
+          const userId = boundArgs[0];
+          let cursorValue = null;
+          let cursorId = null;
+          let limit;
+          if (hasCursor) {
+            [, cursorValue, , cursorId, limit] = boundArgs;
+          } else {
+            [, limit] = boundArgs;
+          }
+
+          let results = agents
+            .filter((a) => access.some((acc) => acc.agent_id === a.id && acc.user_id === userId))
+            .map((a) => ({ ...a, role: access.find((acc) => acc.agent_id === a.id && acc.user_id === userId).role }))
+            .sort((a, b) => {
+              const byUpdated = (b.updated_at || "").localeCompare(a.updated_at || "");
+              return byUpdated !== 0 ? byUpdated : (b.id || "").localeCompare(a.id || "");
+            });
+
+          if (hasCursor) {
+            results = results.filter(
+              (a) => a.updated_at < cursorValue || (a.updated_at === cursorValue && a.id < cursorId)
+            );
+          }
+
+          return { results: results.slice(0, limit) };
+        }
+        if (sql.includes("FROM agent_access") && sql.includes("WHERE agent_id = ?") && sql.includes("ORDER BY created_at")) {
+          const [agentId] = boundArgs;
+          const results = access
+            .filter((a) => a.agent_id === agentId)
+            .sort((x, y) => (x.created_at || "").localeCompare(y.created_at || ""));
+          return { results };
+        }
+        return { results: [] };
+      },
+      async run() {
+        if (sql.startsWith("INSERT INTO agents")) {
+          const [id, name, systemPrompt, model, temperature, maxTokens, topP] = boundArgs;
+          const now = nextTimestamp();
+          agents.push({
+            id,
+            name,
+            system_prompt: systemPrompt,
+            model,
+            temperature: temperature ?? null,
+            max_tokens: maxTokens ?? null,
+            top_p: topP ?? null,
+            created_at: now,
+            updated_at: now,
+          });
+          return { success: true };
+        }
+        if (sql.startsWith("INSERT INTO agent_access")) {
+          const [id, agentId, userId, role] = boundArgs;
+          access.push({ id, agent_id: agentId, user_id: userId, role, created_at: nextTimestamp() });
+          return { success: true };
+        }
+        if (sql.startsWith("UPDATE agent_access")) {
+          const [role, agentId, userId] = boundArgs;
+          const row = access.find((a) => a.agent_id === agentId && a.user_id === userId);
+          if (row) row.role = role;
+          return { success: true };
+        }
+        if (sql.startsWith("DELETE FROM agent_access")) {
+          const [agentId, userId] = boundArgs;
+          const index = access.findIndex((a) => a.agent_id === agentId && a.user_id === userId);
+          if (index !== -1) access.splice(index, 1);
+          return { success: true };
+        }
+        if (sql.startsWith("UPDATE agents")) {
+          const [name, systemPrompt, model, temperature, maxTokens, topP, id] = boundArgs;
+          const row = agents.find((a) => a.id === id);
+          if (row) {
+            row.name = name;
+            row.system_prompt = systemPrompt;
+            row.model = model;
+            row.temperature = temperature ?? null;
+            row.max_tokens = maxTokens ?? null;
+            row.top_p = topP ?? null;
+            row.updated_at = nextTimestamp();
+          }
+          return { success: true };
+        }
+        if (sql.startsWith("DELETE FROM agents")) {
+          const [id] = boundArgs;
+          const index = agents.findIndex((a) => a.id === id);
+          if (index !== -1) {
+            agents.splice(index, 1);
+            // Simulates ON DELETE CASCADE on agent_access (migration 0016).
+            for (let i = access.length - 1; i >= 0; i--) {
+              if (access[i].agent_id === id) access.splice(i, 1);
+            }
+          }
+          return { success: true };
+        }
+        return { success: false };
+      },
+    };
+  }
+
+  return {
+    prepare: (sql) => makeStatement(sql),
+    _agents: agents,
+    _access: access,
+    _nextTimestamp: nextTimestamp,
+  };
+}
+
+// Seeds an agent plus its agent_access rows directly in the mock D1,
+// mirroring seedSession() above.
+function seedAgent(
+  db,
+  { id = "a1", name = "Agent", systemPrompt = "You are helpful.", model = "@cf/mistral/mistral-7b-instruct-v0.1", temperature = null, maxTokens = null, topP = null, owners, editors = [], viewers = [] } = {}
+) {
+  const ownerIds = owners || ["user-1"];
+  const createdAt = db._nextTimestamp();
+  db._agents.push({
+    id,
+    name,
+    system_prompt: systemPrompt,
+    model,
+    temperature,
+    max_tokens: maxTokens,
+    top_p: topP,
+    created_at: createdAt,
+    updated_at: createdAt,
+  });
+  for (const uid of ownerIds) {
+    db._access.push({ id: `acc-${id}-${uid}`, agent_id: id, user_id: uid, role: "owner", created_at: db._nextTimestamp() });
+  }
+  for (const uid of editors) {
+    db._access.push({ id: `acc-${id}-${uid}`, agent_id: id, user_id: uid, role: "editor", created_at: db._nextTimestamp() });
+  }
+  for (const uid of viewers) {
+    db._access.push({ id: `acc-${id}-${uid}`, agent_id: id, user_id: uid, role: "viewer", created_at: db._nextTimestamp() });
+  }
+  return id;
+}
+
 function harness(overrides = {}) {
   const runCalls = [];
   const chatDb = "CHAT_DB" in overrides ? overrides.CHAT_DB : createChatDB();
+  const agentsDb = "AGENTS_DB" in overrides ? overrides.AGENTS_DB : createAgentsDB();
   const env = {
     JWT_SECRET,
     AI: {
@@ -233,6 +419,7 @@ function harness(overrides = {}) {
     },
     ...overrides,
     CHAT_DB: chatDb,
+    AGENTS_DB: agentsDb,
   };
 
   const worker = new AiWorker({}, env);
@@ -250,7 +437,7 @@ function harness(overrides = {}) {
     call(path, { method: "PATCH", body: JSON.stringify(body), headers: { "content-type": "application/json", ...headers } });
   const del = (path, headers = {}) => call(path, { method: "DELETE", headers });
 
-  return { env, worker, runCalls, chatDb, call, get, post, put, patch, del };
+  return { env, worker, runCalls, chatDb, agentsDb, call, get, post, put, patch, del };
 }
 
 async function authHeader(payload = { sub: "user-1", permissions: ["ai:chat"] }) {
@@ -1059,4 +1246,390 @@ test("a session created before the chat_access migration works after a simulated
   const afterBackfill = await get("/v1/sessions/legacy-1", headers);
   assert.equal(afterBackfill.status, 200);
   assert.equal(afterBackfill.body.role, "owner");
+});
+
+// --- Agents (docs/specs/agent-registration.md, agent-registration-out-of-scope.md) ---
+
+test("POST /v1/agents creates an agent and the creator becomes owner", async () => {
+  const { post, agentsDb } = harness();
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:agents"] });
+
+  const { status, body } = await post(
+    "/v1/agents",
+    {
+      name: "Support Bot",
+      system_prompt: "You are a support agent.",
+      model: "@cf/mistral/mistral-7b-instruct-v0.1",
+      temperature: 0.5,
+      max_tokens: 512,
+      top_p: 0.9,
+    },
+    headers
+  );
+
+  assert.equal(status, 201);
+  assert.ok(body.id);
+  assert.equal(body.name, "Support Bot");
+  assert.equal(body.system_prompt, "You are a support agent.");
+  assert.equal(body.model, "@cf/mistral/mistral-7b-instruct-v0.1");
+  assert.equal(body.temperature, 0.5);
+  assert.equal(body.max_tokens, 512);
+  assert.equal(body.top_p, 0.9);
+  assert.equal(body.role, "owner");
+
+  const access = agentsDb._access.find((a) => a.agent_id === body.id && a.user_id === "user-1");
+  assert.equal(access.role, "owner");
+});
+
+test("POST /v1/agents rejects missing required fields", async () => {
+  const { post } = harness();
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:agents"] });
+
+  assert.equal((await post("/v1/agents", {}, headers)).status, 400);
+  assert.equal((await post("/v1/agents", { name: "x" }, headers)).status, 400);
+  assert.equal((await post("/v1/agents", { name: "x", system_prompt: "y" }, headers)).status, 400);
+});
+
+test("agent routes require a valid JWT with the ai:agents permission", async () => {
+  const { post } = harness();
+
+  const noToken = await post("/v1/agents", {});
+  assert.equal(noToken.status, 401);
+
+  const withoutPermission = await authHeader({ sub: "user-1", permissions: ["ai:chat"] });
+  const forbidden = await post("/v1/agents", { name: "x", system_prompt: "y", model: "m" }, withoutPermission);
+  assert.equal(forbidden.status, 403);
+});
+
+test("missing ai:agents permission returns 403 before ever touching AGENTS_DB", async () => {
+  const { post } = harness({ AGENTS_DB: undefined });
+  const headers = await authHeader({ sub: "user-1", permissions: [] });
+
+  const { status } = await post("/v1/agents", { name: "x", system_prompt: "y", model: "m" }, headers);
+  assert.equal(status, 403);
+});
+
+test("POST /v1/agents fails closed when AGENTS_DB is missing", async () => {
+  const { post } = harness({ AGENTS_DB: undefined });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:agents"] });
+
+  const { status, body } = await post("/v1/agents", { name: "x", system_prompt: "y", model: "m" }, headers);
+  assert.equal(status, 500);
+  assert.match(body.error.message, /Agents database/);
+});
+
+test("a user with no agent_access row at all gets 404 on every /v1/agents/:id* route", async () => {
+  const db = createAgentsDB();
+  seedAgent(db, { id: "a1", owners: ["user-1"] });
+  const { get, patch, del, put } = harness({ AGENTS_DB: db });
+  const strangerHeaders = await authHeader({ sub: "user-2", permissions: ["ai:agents"] });
+
+  assert.equal((await get("/v1/agents/a1", strangerHeaders)).status, 404);
+  assert.equal((await patch("/v1/agents/a1", { name: "x" }, strangerHeaders)).status, 404);
+  assert.equal((await del("/v1/agents/a1", strangerHeaders)).status, 404);
+  assert.equal((await get("/v1/agents/a1/access", strangerHeaders)).status, 404);
+  assert.equal((await put("/v1/agents/a1/access/user-3", { role: "viewer" }, strangerHeaders)).status, 404);
+  assert.equal((await del("/v1/agents/a1/access/user-3", strangerHeaders)).status, 404);
+});
+
+test("a viewer can read an agent but not PATCH or DELETE it (403)", async () => {
+  const db = createAgentsDB();
+  seedAgent(db, { id: "a1", owners: ["user-1"], viewers: ["user-2"] });
+  const { get, patch, del } = harness({ AGENTS_DB: db });
+  const viewerHeaders = await authHeader({ sub: "user-2", permissions: ["ai:agents"] });
+
+  assert.equal((await get("/v1/agents/a1", viewerHeaders)).status, 200);
+  assert.equal((await patch("/v1/agents/a1", { name: "x" }, viewerHeaders)).status, 403);
+  assert.equal((await del("/v1/agents/a1", viewerHeaders)).status, 403);
+});
+
+test("an editor can PATCH an agent but not DELETE it or manage access (403)", async () => {
+  const db = createAgentsDB();
+  seedAgent(db, { id: "a1", owners: ["user-1"], editors: ["user-2"] });
+  const { patch, del, put } = harness({ AGENTS_DB: db });
+  const editorHeaders = await authHeader({ sub: "user-2", permissions: ["ai:agents"] });
+
+  const patched = await patch("/v1/agents/a1", { name: "Renamed" }, editorHeaders);
+  assert.equal(patched.status, 200);
+  assert.equal(patched.body.name, "Renamed");
+
+  assert.equal((await del("/v1/agents/a1", editorHeaders)).status, 403);
+  assert.equal((await put("/v1/agents/a1/access/user-3", { role: "viewer" }, editorHeaders)).status, 403);
+});
+
+test("PATCH /v1/agents/:id updates only the provided fields", async () => {
+  const db = createAgentsDB();
+  seedAgent(db, { id: "a1", owners: ["user-1"], name: "Original", systemPrompt: "Prompt", model: "model-a", temperature: 0.5 });
+  const { patch } = harness({ AGENTS_DB: db });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:agents"] });
+
+  const { status, body } = await patch("/v1/agents/a1", { temperature: 0.9 }, headers);
+
+  assert.equal(status, 200);
+  assert.equal(body.name, "Original");
+  assert.equal(body.system_prompt, "Prompt");
+  assert.equal(body.model, "model-a");
+  assert.equal(body.temperature, 0.9);
+});
+
+test("DELETE /v1/agents/:id removes the agent and cascades its agent_access rows", async () => {
+  const db = createAgentsDB();
+  seedAgent(db, { id: "a1", owners: ["user-1"] });
+  const { del, get } = harness({ AGENTS_DB: db });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:agents"] });
+
+  const { status, body } = await del("/v1/agents/a1", headers);
+  assert.equal(status, 200);
+  assert.deepEqual(body, { success: true });
+
+  assert.equal(db._agents.some((a) => a.id === "a1"), false);
+  assert.equal(db._access.some((a) => a.agent_id === "a1"), false);
+  assert.equal((await get("/v1/agents/a1", headers)).status, 404);
+});
+
+test("PUT /v1/agents/:id/access/:userId rejects an invalid role with 400", async () => {
+  const db = createAgentsDB();
+  seedAgent(db, { id: "a1", owners: ["user-1"] });
+  const { put } = harness({ AGENTS_DB: db });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:agents"] });
+
+  const { status, body } = await put("/v1/agents/a1/access/user-2", { role: "admin" }, headers);
+
+  assert.equal(status, 400);
+  assert.match(body.error.message, /role/);
+});
+
+test("PUT /v1/agents/:id/access/:userId rejects downgrading the sole owner with 409", async () => {
+  const db = createAgentsDB();
+  seedAgent(db, { id: "a1", owners: ["user-1"] });
+  const { put } = harness({ AGENTS_DB: db });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:agents"] });
+
+  const { status, body } = await put("/v1/agents/a1/access/user-1", { role: "editor" }, headers);
+
+  assert.equal(status, 409);
+  assert.match(body.error.message, /at least one owner/);
+});
+
+test("DELETE /v1/agents/:id/access/:userId rejects removing the sole owner with 409, but self-removal works as a mere viewer", async () => {
+  const db = createAgentsDB();
+  seedAgent(db, { id: "a1", owners: ["user-1"] });
+  const { del } = harness({ AGENTS_DB: db });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:agents"] });
+
+  const soleOwnerRemoval = await del("/v1/agents/a1/access/user-1", headers);
+  assert.equal(soleOwnerRemoval.status, 409);
+  assert.match(soleOwnerRemoval.body.error.message, /at least one owner/);
+
+  const db2 = createAgentsDB();
+  seedAgent(db2, { id: "a2", owners: ["user-1"], viewers: ["user-2"] });
+  const { del: del2 } = harness({ AGENTS_DB: db2 });
+  const viewerHeaders = await authHeader({ sub: "user-2", permissions: ["ai:agents"] });
+
+  const selfRemoval = await del2("/v1/agents/a2/access/user-2", viewerHeaders);
+  assert.equal(selfRemoval.status, 200);
+});
+
+test("DELETE /v1/agents/:id/access/:userId returns 404 when the target has no access row", async () => {
+  const db = createAgentsDB();
+  seedAgent(db, { id: "a1", owners: ["user-1"] });
+  const { del } = harness({ AGENTS_DB: db });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:agents"] });
+
+  const { status, body } = await del("/v1/agents/a1/access/user-2", headers);
+
+  assert.equal(status, 404);
+  assert.match(body.error.message, /not found/i);
+});
+
+test("GET /v1/agents/:id/access can be called by a viewer and lists every collaborator", async () => {
+  const db = createAgentsDB();
+  seedAgent(db, { id: "a1", owners: ["user-2"], viewers: ["user-1"] });
+  const { get } = harness({ AGENTS_DB: db });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:agents"] });
+
+  const { status, body } = await get("/v1/agents/a1/access", headers);
+
+  assert.equal(status, 200);
+  assert.equal(body.count, 2);
+  const byUser = Object.fromEntries(body.data.map((row) => [row.user_id, row.role]));
+  assert.equal(byUser["user-1"], "viewer");
+  assert.equal(byUser["user-2"], "owner");
+});
+
+test("GET /v1/agents lists only the agents the caller has agent_access to", async () => {
+  const { post, get } = harness();
+  const user1Headers = await authHeader({ sub: "user-1", permissions: ["ai:agents"] });
+  const user2Headers = await authHeader({ sub: "user-2", permissions: ["ai:agents"] });
+
+  await post("/v1/agents", { name: "A", system_prompt: "p", model: "m" }, user1Headers);
+  await post("/v1/agents", { name: "B", system_prompt: "p", model: "m" }, user2Headers);
+
+  const { body } = await get("/v1/agents", user1Headers);
+
+  assert.equal(body.data.length, 1);
+  assert.equal(body.data[0].name, "A");
+});
+
+// --- Agent -> session snapshot (docs/specs/agent-registration.md) ---
+
+test("POST /v1/sessions with a valid agent_id snapshots the agent's config onto the session", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, {
+    id: "a1",
+    owners: ["user-1"],
+    name: "Support",
+    systemPrompt: "Be nice.",
+    model: "custom-model",
+    temperature: 0.3,
+    maxTokens: 256,
+    topP: 0.8,
+  });
+  const { post, chatDb } = harness({ AGENTS_DB: agentsDb });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:chat"] });
+
+  const { status, body } = await post("/v1/sessions", { agent_id: "a1" }, headers);
+
+  assert.equal(status, 201);
+  assert.equal(body.agent_id, "a1");
+
+  const session = chatDb._sessions.find((s) => s.id === body.id);
+  assert.equal(session.agent_system_prompt, "Be nice.");
+  assert.equal(session.agent_model, "custom-model");
+  assert.equal(session.agent_temperature, 0.3);
+  assert.equal(session.agent_max_tokens, 256);
+  assert.equal(session.agent_top_p, 0.8);
+});
+
+test("POST /v1/sessions without agent_id leaves the snapshot columns null (unchanged behavior)", async () => {
+  const { post, chatDb } = harness();
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:chat"] });
+
+  const { status, body } = await post("/v1/sessions", {}, headers);
+
+  assert.equal(status, 201);
+  assert.equal(body.agent_id, null);
+
+  const session = chatDb._sessions.find((s) => s.id === body.id);
+  assert.equal(session.agent_system_prompt, null);
+  assert.equal(session.agent_model, null);
+});
+
+test("POST /v1/sessions with a nonexistent agent_id returns 404", async () => {
+  const { post } = harness();
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:chat"] });
+
+  const { status } = await post("/v1/sessions", { agent_id: "missing" }, headers);
+
+  assert.equal(status, 404);
+});
+
+test("POST /v1/sessions with an agent_id the user has no access to returns 404 (not 403)", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, { id: "a1", owners: ["user-2"] });
+  const { post } = harness({ AGENTS_DB: agentsDb });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:chat"] });
+
+  const { status } = await post("/v1/sessions", { agent_id: "a1" }, headers);
+
+  assert.equal(status, 404);
+});
+
+test("POST /v1/sessions with agent_id fails closed when AGENTS_DB is missing", async () => {
+  const { post } = harness({ AGENTS_DB: undefined });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:chat"] });
+
+  const { status, body } = await post("/v1/sessions", { agent_id: "a1" }, headers);
+
+  assert.equal(status, 500);
+  assert.match(body.error.message, /Agents database/);
+});
+
+test("a viewer of an agent can create a session referencing it, but cannot PATCH/DELETE the agent", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, { id: "a1", owners: ["user-1"], viewers: ["user-2"] });
+  const { post, patch, del } = harness({ AGENTS_DB: agentsDb });
+  const viewerHeaders = await authHeader({ sub: "user-2", permissions: ["ai:chat", "ai:agents"] });
+
+  const created = await post("/v1/sessions", { agent_id: "a1" }, viewerHeaders);
+  assert.equal(created.status, 201);
+  assert.equal(created.body.agent_id, "a1");
+
+  assert.equal((await patch("/v1/agents/a1", { name: "x" }, viewerHeaders)).status, 403);
+  assert.equal((await del("/v1/agents/a1", viewerHeaders)).status, 403);
+});
+
+test("editing an agent after a session is created does not change the session's already-copied snapshot", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, {
+    id: "a1",
+    owners: ["user-1"],
+    systemPrompt: "Original prompt",
+    model: "model-a",
+    temperature: 0.4,
+  });
+  const { post, patch, chatDb } = harness({ AGENTS_DB: agentsDb });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:chat", "ai:agents"] });
+
+  const created = await post("/v1/sessions", { agent_id: "a1" }, headers);
+  const sessionId = created.body.id;
+
+  const patched = await patch(
+    "/v1/agents/a1",
+    { system_prompt: "Updated prompt", model: "model-b", temperature: 0.9 },
+    headers
+  );
+  assert.equal(patched.status, 200);
+
+  const session = chatDb._sessions.find((s) => s.id === sessionId);
+  assert.equal(session.agent_system_prompt, "Original prompt");
+  assert.equal(session.agent_model, "model-a");
+  assert.equal(session.agent_temperature, 0.4);
+});
+
+test("POST /v1/sessions/:id/messages on a session with an agent applies the snapshot's system prompt and generation params", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, {
+    id: "a1",
+    owners: ["user-1"],
+    systemPrompt: "You are a pirate.",
+    model: "agent-model",
+    temperature: 0.2,
+    maxTokens: 111,
+    topP: 0.6,
+  });
+  const { post, runCalls } = harness({ AGENTS_DB: agentsDb });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:chat", "ai:agents"] });
+
+  const created = await post("/v1/sessions", { agent_id: "a1" }, headers);
+  const sessionId = created.body.id;
+
+  const sent = await post(`/v1/sessions/${sessionId}/messages`, { content: "ahoy" }, headers);
+  assert.equal(sent.status, 200);
+
+  const lastCall = runCalls[runCalls.length - 1];
+  assert.equal(lastCall.model, "agent-model");
+  assert.equal(lastCall.input.temperature, 0.2);
+  assert.equal(lastCall.input.max_tokens, 111);
+  assert.equal(lastCall.input.top_p, 0.6);
+
+  const sentRoles = lastCall.input.messages.map((m) => m.role);
+  assert.deepEqual(sentRoles, ["user"], "the agent's system prompt must be merged into the first user message");
+  assert.match(lastCall.input.messages[0].content, /You are a pirate/);
+  assert.match(lastCall.input.messages[0].content, /ahoy/);
+});
+
+test("POST /v1/sessions/:id/messages without an agent snapshot uses the default generation params (unchanged behavior)", async () => {
+  const { post, runCalls } = harness();
+  const headers = await authHeader();
+
+  const created = await post("/v1/sessions", {}, headers);
+  const sessionId = created.body.id;
+
+  await post(`/v1/sessions/${sessionId}/messages`, { content: "hi" }, headers);
+
+  const lastCall = runCalls[runCalls.length - 1];
+  assert.equal(lastCall.input.temperature, 0.7);
+  assert.equal(lastCall.input.max_tokens, 1024);
+  assert.equal(lastCall.input.top_p, 1);
 });
