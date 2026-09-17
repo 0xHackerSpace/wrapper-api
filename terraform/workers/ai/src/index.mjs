@@ -13,18 +13,30 @@ import {
   createSession,
   listSessionsForUser,
   getSessionById,
+  getSessionAgentConfig,
   listMessagesPage,
   listRecentMessages,
   addMessage,
   touchSession,
   renameSession,
   deleteSession,
-  requireRole,
+  requireRole as requireSessionRole,
   listChatAccess,
   upsertChatAccess,
   deleteChatAccess,
   ConflictError,
 } from "./lib/chat-db.mjs";
+import {
+  createAgent,
+  getAgentById,
+  listAgentsForUser,
+  updateAgent,
+  deleteAgent,
+  requireRole as requireAgentRole,
+  listAgentAccess,
+  upsertAgentAccess,
+  deleteAgentAccess,
+} from "./lib/agent-db.mjs";
 
 const TITLE_MAX_LENGTH = 50;
 
@@ -73,6 +85,30 @@ export default class extends WorkerEntrypoint {
           if (!resourceId && request.method === "GET") return await handleListAccess(request, this.env, sessionId);
           if (resourceId && request.method === "PUT") return await handleGrantAccess(request, this.env, sessionId, resourceId);
           if (resourceId && request.method === "DELETE") return await handleRevokeAccess(request, this.env, sessionId, resourceId);
+        }
+      }
+
+      if (pathname === "/v1/agents" && request.method === "POST") {
+        return await handleCreateAgent(request, this.env);
+      }
+      if (pathname === "/v1/agents" && request.method === "GET") {
+        return await handleListAgents(request, this.env, url);
+      }
+
+      const agentMatch = pathname.match(/^\/v1\/agents\/([^/]+)(?:\/(access)(?:\/([^/]+))?)?$/);
+      if (agentMatch) {
+        const agentId = agentMatch[1];
+        const resource = agentMatch[2];
+        const resourceId = agentMatch[3];
+
+        if (!resource && request.method === "GET") return await handleGetAgent(request, this.env, agentId);
+        if (!resource && request.method === "PATCH") return await handlePatchAgent(request, this.env, agentId);
+        if (!resource && request.method === "DELETE") return await handleDeleteAgent(request, this.env, agentId);
+
+        if (resource === "access") {
+          if (!resourceId && request.method === "GET") return await handleListAgentAccess(request, this.env, agentId);
+          if (resourceId && request.method === "PUT") return await handleGrantAgentAccess(request, this.env, agentId, resourceId);
+          if (resourceId && request.method === "DELETE") return await handleRevokeAgentAccess(request, this.env, agentId, resourceId);
         }
       }
 
@@ -126,7 +162,8 @@ function handleInfo() {
       models: "GET /v1/models",
       chat_completions:
         "POST /v1/chat/completions (requires auth + ai:chat permission; body { stream: true } returns text/event-stream chat.completion.chunk events instead of a single JSON response)",
-      create_session: "POST /v1/sessions (requires auth + ai:chat permission, creator becomes owner)",
+      create_session:
+        "POST /v1/sessions (requires auth + ai:chat permission, creator becomes owner; optional body { agent_id } snapshots that agent's system_prompt/model/temperature/max_tokens/top_p onto the session, requires viewer+ role in agent_access, 404 if missing/no access)",
       list_sessions: "GET /v1/sessions?limit=&cursor= (requires auth + ai:chat permission, lists sessions you have chat_access to, ordered by updated_at desc)",
       get_session: "GET /v1/sessions/:id (requires auth + ai:chat permission + viewer+ role; metadata only, no messages)",
       rename_session: "PATCH /v1/sessions/:id (requires auth + ai:chat permission + editor/owner role, body { title })",
@@ -137,6 +174,14 @@ function handleInfo() {
       grant_access: "PUT /v1/sessions/:id/access/:userId (requires auth + ai:chat permission + owner role, upserts a collaborator's role)",
       revoke_access: "DELETE /v1/sessions/:id/access/:userId (requires auth + ai:chat permission + owner role, or self-removal)",
       list_access: "GET /v1/sessions/:id/access (requires auth + ai:chat permission + viewer+ role)",
+      create_agent: "POST /v1/agents (requires auth + ai:agents permission, creator becomes owner)",
+      list_agents: "GET /v1/agents?limit=&cursor= (requires auth + ai:agents permission, lists agents you have agent_access to, ordered by updated_at desc)",
+      get_agent: "GET /v1/agents/:id (requires auth + ai:agents permission + viewer+ role)",
+      patch_agent: "PATCH /v1/agents/:id (requires auth + ai:agents permission + editor/owner role, body may include name/system_prompt/model/temperature/max_tokens/top_p)",
+      delete_agent: "DELETE /v1/agents/:id (requires auth + ai:agents permission + owner role)",
+      grant_agent_access: "PUT /v1/agents/:id/access/:userId (requires auth + ai:agents permission + owner role, upserts a collaborator's role)",
+      revoke_agent_access: "DELETE /v1/agents/:id/access/:userId (requires auth + ai:agents permission + owner role, or self-removal)",
+      list_agent_access: "GET /v1/agents/:id/access (requires auth + ai:agents permission + viewer+ role)",
     },
     documentation: "https://platform.openai.com/docs/api-reference",
   });
@@ -197,6 +242,11 @@ async function streamChatCompletionResponse(ai, validated) {
   });
 }
 
+// Optional body { agent_id }: resolves and authorizes the agent (viewer+ in
+// agent_access, via AGENTS_DB) and copies its config into a snapshot passed
+// to createSession() -- see docs/specs/agent-registration.md. Missing agent
+// or no access both return 404 (not 403), same non-leaking semantics as
+// chat_access/agent_access elsewhere. Without agent_id, behavior is unchanged.
 async function handleCreateSession(request, env) {
   const payload = await requirePermission(request, env, "ai:chat");
 
@@ -204,9 +254,38 @@ async function handleCreateSession(request, env) {
     return internalError("Chat database not configured");
   }
 
-  const session = await createSession(env.CHAT_DB, { userId: payload.sub });
+  const body = await request.json();
+  const { agent_id: agentId } = body || {};
 
-  return json({ id: session.id, title: session.title, created_at: session.created_at }, 201);
+  let agentSnapshot = null;
+  if (agentId) {
+    if (!env.AGENTS_DB) {
+      return internalError("Agents database not configured");
+    }
+
+    const role = await requireAgentRole(env.AGENTS_DB, agentId, payload.sub, "viewer");
+    if (!role) {
+      return notFound("Agent not found");
+    }
+
+    const agent = await getAgentById(env.AGENTS_DB, agentId);
+    if (!agent) {
+      return notFound("Agent not found");
+    }
+
+    agentSnapshot = {
+      agentId,
+      systemPrompt: agent.system_prompt,
+      model: agent.model,
+      temperature: agent.temperature,
+      maxTokens: agent.max_tokens,
+      topP: agent.top_p,
+    };
+  }
+
+  const session = await createSession(env.CHAT_DB, { userId: payload.sub, agentSnapshot });
+
+  return json({ id: session.id, title: session.title, agent_id: session.agent_id, created_at: session.created_at }, 201);
 }
 
 async function handleListSessions(request, env, url) {
@@ -236,7 +315,7 @@ async function handleGetSession(request, env, sessionId) {
     return internalError("Chat database not configured");
   }
 
-  const role = await requireRole(env.CHAT_DB, sessionId, payload.sub, "viewer");
+  const role = await requireSessionRole(env.CHAT_DB, sessionId, payload.sub, "viewer");
   if (!role) {
     return notFound("Session not found");
   }
@@ -252,7 +331,7 @@ async function handleDeleteSession(request, env, sessionId) {
     return internalError("Chat database not configured");
   }
 
-  const role = await requireRole(env.CHAT_DB, sessionId, payload.sub, "owner");
+  const role = await requireSessionRole(env.CHAT_DB, sessionId, payload.sub, "owner");
   if (!role) {
     return notFound("Session not found");
   }
@@ -272,7 +351,7 @@ async function handlePatchSession(request, env, sessionId) {
     return internalError("Chat database not configured");
   }
 
-  const role = await requireRole(env.CHAT_DB, sessionId, payload.sub, "editor");
+  const role = await requireSessionRole(env.CHAT_DB, sessionId, payload.sub, "editor");
   if (!role) {
     return notFound("Session not found");
   }
@@ -293,7 +372,7 @@ async function handleSendMessage(request, env, sessionId) {
     return internalError("AI binding not configured");
   }
 
-  const role = await requireRole(env.CHAT_DB, sessionId, payload.sub, "editor");
+  const role = await requireSessionRole(env.CHAT_DB, sessionId, payload.sub, "editor");
   if (!role) {
     return notFound("Session not found");
   }
@@ -313,11 +392,23 @@ async function handleSendMessage(request, env, sessionId) {
   const recentMessages = await listRecentMessages(env.CHAT_DB, sessionId);
   const modelMessages = recentMessages.map((m) => ({ role: m.role, content: m.content }));
 
+  // Sessions created with an agent_id carry a frozen config snapshot
+  // (agent_system_prompt/model/temperature/max_tokens/top_p) -- dev-agents is
+  // never queried again here, only the session's own copy (see
+  // docs/specs/agent-registration.md). Without a snapshot, behavior is
+  // unchanged: no fixed system prompt, model/params from the request or
+  // chatCompletion()'s own defaults.
+  const agentConfig = await getSessionAgentConfig(env.CHAT_DB, sessionId);
+  if (agentConfig?.systemPrompt) {
+    modelMessages.unshift({ role: "system", content: agentConfig.systemPrompt });
+  }
+  const aiOptions = buildAiOptions(agentConfig, model);
+
   if (stream === true) {
-    return await streamSendMessageResponse(env, sessionId, modelMessages, { model, userContent: content });
+    return await streamSendMessageResponse(env, sessionId, modelMessages, { aiOptions, userContent: content });
   }
 
-  const result = await chatCompletion(env.AI, modelMessages, { model });
+  const result = await chatCompletion(env.AI, modelMessages, aiOptions);
   const assistantContent = result.choices[0].message.content;
 
   await addMessage(env.CHAT_DB, { sessionId, role: "assistant", content: assistantContent });
@@ -330,6 +421,30 @@ async function handleSendMessage(request, env, sessionId) {
   });
 }
 
+// Merges the session's agent snapshot (if any) with the per-request `model`
+// override into the options object chatCompletion()/chatCompletionStream()
+// expect. An explicit body.model always wins over the snapshot's model,
+// mirroring the pre-existing per-call override; temperature/max_tokens/top_p
+// have no per-request equivalent today, so they only ever come from the
+// snapshot. Keys are omitted (not set to null) when absent so chatCompletion's
+// own default parameter values still kick in -- default params only trigger
+// on `undefined`, not `null`.
+function buildAiOptions(agentConfig, explicitModel) {
+  const options = {};
+  const resolvedModel = explicitModel || agentConfig?.model;
+  if (resolvedModel) options.model = resolvedModel;
+  if (agentConfig?.temperature !== null && agentConfig?.temperature !== undefined) {
+    options.temperature = agentConfig.temperature;
+  }
+  if (agentConfig?.maxTokens !== null && agentConfig?.maxTokens !== undefined) {
+    options.max_tokens = agentConfig.maxTokens;
+  }
+  if (agentConfig?.topP !== null && agentConfig?.topP !== undefined) {
+    options.top_p = agentConfig.topP;
+  }
+  return options;
+}
+
 // Buffer + forward: chunks stream to the client as they arrive, but the
 // assistant message is only persisted (addMessage + touchSession, same as
 // the non-streaming path above) once the stream ends successfully -- via
@@ -337,8 +452,8 @@ async function handleSendMessage(request, env, sessionId) {
 // content event and before the finish_reason/usage/[DONE] chunks. If the
 // stream fails mid-way, onComplete never runs, so nothing from the assistant
 // is persisted; the user message (already persisted by the caller) stays.
-async function streamSendMessageResponse(env, sessionId, modelMessages, { model, userContent }) {
-  const { id, created, model: usedModel, events } = await chatCompletionStream(env.AI, modelMessages, { model });
+async function streamSendMessageResponse(env, sessionId, modelMessages, { aiOptions, userContent }) {
+  const { id, created, model: usedModel, events } = await chatCompletionStream(env.AI, modelMessages, aiOptions);
 
   const stream = createChatCompletionChunkStream(events, { id, created, model: usedModel }, {
     onComplete: async (assistantContent) => {
@@ -360,7 +475,7 @@ async function handleListMessages(request, env, sessionId, url) {
     return internalError("Chat database not configured");
   }
 
-  const role = await requireRole(env.CHAT_DB, sessionId, payload.sub, "viewer");
+  const role = await requireSessionRole(env.CHAT_DB, sessionId, payload.sub, "viewer");
   if (!role) {
     return notFound("Session not found");
   }
@@ -380,7 +495,7 @@ async function handleGrantAccess(request, env, sessionId, targetUserId) {
     return internalError("Chat database not configured");
   }
 
-  const role = await requireRole(env.CHAT_DB, sessionId, payload.sub, "owner");
+  const role = await requireSessionRole(env.CHAT_DB, sessionId, payload.sub, "owner");
   if (!role) {
     return notFound("Session not found");
   }
@@ -406,7 +521,7 @@ async function handleRevokeAccess(request, env, sessionId, targetUserId) {
     const session = await getSessionById(env.CHAT_DB, sessionId);
     if (!session) return notFound("Session not found");
   } else {
-    const role = await requireRole(env.CHAT_DB, sessionId, payload.sub, "owner");
+    const role = await requireSessionRole(env.CHAT_DB, sessionId, payload.sub, "owner");
     if (!role) return notFound("Session not found");
   }
 
@@ -423,12 +538,168 @@ async function handleListAccess(request, env, sessionId) {
     return internalError("Chat database not configured");
   }
 
-  const role = await requireRole(env.CHAT_DB, sessionId, payload.sub, "viewer");
+  const role = await requireSessionRole(env.CHAT_DB, sessionId, payload.sub, "viewer");
   if (!role) {
     return notFound("Session not found");
   }
 
   const access = await listChatAccess(env.CHAT_DB, sessionId);
+
+  return json({ success: true, data: access, count: access.length });
+}
+
+// --- Agents (docs/specs/agent-registration.md) ---
+// Mirrors the /v1/sessions* handlers above: ai:agents is a separate RBAC
+// permission from ai:chat (checked first, independent of any agent_access
+// role), and agent_access follows the exact same owner/editor/viewer +
+// "always >=1 owner" model as chat_access.
+
+async function handleCreateAgent(request, env) {
+  const payload = await requirePermission(request, env, "ai:agents");
+
+  if (!env.AGENTS_DB) {
+    return internalError("Agents database not configured");
+  }
+
+  const body = await request.json();
+  const agent = await createAgent(env.AGENTS_DB, { userId: payload.sub, ...body });
+
+  return json(agent, 201);
+}
+
+async function handleListAgents(request, env, url) {
+  const payload = await requirePermission(request, env, "ai:agents");
+
+  if (!env.AGENTS_DB) {
+    return internalError("Agents database not configured");
+  }
+
+  const limit = url.searchParams.get("limit");
+  const cursor = url.searchParams.get("cursor");
+
+  const { data, next_cursor } = await listAgentsForUser(env.AGENTS_DB, payload.sub, { limit, cursor });
+
+  return json({ object: "list", data, next_cursor });
+}
+
+// 404 (not 403) when the actor has no agent_access row at all for this agent
+// -- requireAgentRole() returns null in that case rather than throwing, so an
+// agent id never leaks to someone with zero access to it. Once the actor has
+// *some* role, an insufficient one (e.g. viewer trying to PATCH) surfaces as
+// 403 instead, since they already know the agent exists.
+async function handleGetAgent(request, env, agentId) {
+  const payload = await requirePermission(request, env, "ai:agents");
+
+  if (!env.AGENTS_DB) {
+    return internalError("Agents database not configured");
+  }
+
+  const role = await requireAgentRole(env.AGENTS_DB, agentId, payload.sub, "viewer");
+  if (!role) {
+    return notFound("Agent not found");
+  }
+
+  const agent = await getAgentById(env.AGENTS_DB, agentId);
+  return json({ ...agent, role });
+}
+
+async function handlePatchAgent(request, env, agentId) {
+  const payload = await requirePermission(request, env, "ai:agents");
+
+  if (!env.AGENTS_DB) {
+    return internalError("Agents database not configured");
+  }
+
+  const role = await requireAgentRole(env.AGENTS_DB, agentId, payload.sub, "editor");
+  if (!role) {
+    return notFound("Agent not found");
+  }
+
+  const body = await request.json();
+  const agent = await updateAgent(env.AGENTS_DB, agentId, body);
+  if (!agent) {
+    return notFound("Agent not found");
+  }
+
+  return json({ ...agent, role });
+}
+
+async function handleDeleteAgent(request, env, agentId) {
+  const payload = await requirePermission(request, env, "ai:agents");
+
+  if (!env.AGENTS_DB) {
+    return internalError("Agents database not configured");
+  }
+
+  const role = await requireAgentRole(env.AGENTS_DB, agentId, payload.sub, "owner");
+  if (!role) {
+    return notFound("Agent not found");
+  }
+
+  const removed = await deleteAgent(env.AGENTS_DB, agentId);
+  if (!removed) {
+    return notFound("Agent not found");
+  }
+
+  return json({ success: true });
+}
+
+async function handleGrantAgentAccess(request, env, agentId, targetUserId) {
+  const payload = await requirePermission(request, env, "ai:agents");
+
+  if (!env.AGENTS_DB) {
+    return internalError("Agents database not configured");
+  }
+
+  const role = await requireAgentRole(env.AGENTS_DB, agentId, payload.sub, "owner");
+  if (!role) {
+    return notFound("Agent not found");
+  }
+
+  const body = await request.json();
+  const { role: newRole } = body;
+
+  const access = await upsertAgentAccess(env.AGENTS_DB, agentId, targetUserId, newRole);
+
+  return json({ success: true, data: access });
+}
+
+async function handleRevokeAgentAccess(request, env, agentId, targetUserId) {
+  const payload = await requirePermission(request, env, "ai:agents");
+
+  if (!env.AGENTS_DB) {
+    return internalError("Agents database not configured");
+  }
+
+  const isSelf = payload.sub === targetUserId;
+
+  if (isSelf) {
+    const agent = await getAgentById(env.AGENTS_DB, agentId);
+    if (!agent) return notFound("Agent not found");
+  } else {
+    const role = await requireAgentRole(env.AGENTS_DB, agentId, payload.sub, "owner");
+    if (!role) return notFound("Agent not found");
+  }
+
+  const removed = await deleteAgentAccess(env.AGENTS_DB, agentId, targetUserId);
+  if (!removed) return notFound("Access not found");
+
+  return json({ success: true });
+}
+
+async function handleListAgentAccess(request, env, agentId) {
+  const payload = await requirePermission(request, env, "ai:agents");
+
+  if (!env.AGENTS_DB) {
+    return internalError("Agents database not configured");
+  }
+
+  const role = await requireAgentRole(env.AGENTS_DB, agentId, payload.sub, "viewer");
+  if (!role) {
+    return notFound("Agent not found");
+  }
+
+  const access = await listAgentAccess(env.AGENTS_DB, agentId);
 
   return json({ success: true, data: access, count: access.length });
 }

@@ -6,11 +6,10 @@
 // ConflictError, ROLE_RANK, requireRole() and the access CRUD helpers below
 // mirror graph-db.mjs's ACL model (owner/editor/viewer, "always >=1 owner"
 // invariant) adapted to chat_access instead of graph_access.
-import { AuthError } from "./auth.mjs";
+import { AuthError, ConflictError } from "./auth.mjs";
 import { ValidationError } from "./ai.mjs";
 
-export { ValidationError };
-export class ConflictError extends Error {}
+export { ValidationError, ConflictError };
 
 export const ROLE_RANK = { viewer: 1, editor: 2, owner: 3 };
 const VALID_ROLES = ["owner", "editor", "viewer"];
@@ -26,6 +25,7 @@ function mapSessionRow(row) {
     id: row.id,
     user_id: row.user_id,
     title: row.title ?? null,
+    agent_id: row.agent_id ?? null,
     created_at: row.created_at,
     updated_at: row.updated_at,
     ...(row.role !== undefined ? { role: row.role } : {}),
@@ -70,14 +70,31 @@ function clampLimit(limit) {
   return Math.min(MAX_PAGE_SIZE, Math.trunc(parsed));
 }
 
-export async function createSession(db, { userId }) {
+// agentSnapshot, when present, is copied verbatim into the new row's
+// agent_* columns (docs/specs/agent-registration.md) -- the caller
+// (index.mjs's handleCreateSession) is responsible for resolving and
+// authorizing the agent via agent-db.mjs *before* calling this; createSession
+// itself never touches AGENTS_DB.
+export async function createSession(db, { userId, agentSnapshot = null }) {
   if (!db) {
     throw new Error("Database not configured");
   }
 
   const id = crypto.randomUUID();
+  const agentId = agentSnapshot?.agentId ?? null;
+  const agentSystemPrompt = agentSnapshot?.systemPrompt ?? null;
+  const agentModel = agentSnapshot?.model ?? null;
+  const agentTemperature = agentSnapshot?.temperature ?? null;
+  const agentMaxTokens = agentSnapshot?.maxTokens ?? null;
+  const agentTopP = agentSnapshot?.topP ?? null;
 
-  await db.prepare("INSERT INTO chat_sessions (id, user_id) VALUES (?, ?)").bind(id, userId).run();
+  await db
+    .prepare(
+      `INSERT INTO chat_sessions (id, user_id, agent_id, agent_system_prompt, agent_model, agent_temperature, agent_max_tokens, agent_top_p)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .bind(id, userId, agentId, agentSystemPrompt, agentModel, agentTemperature, agentMaxTokens, agentTopP)
+    .run();
 
   // The creator becomes the sole owner in chat_access -- same pattern as
   // createGraph() in graph-db.mjs. D1's HTTP API has no real multi-statement
@@ -98,11 +115,41 @@ export async function getSessionById(db, id) {
   }
 
   const row = await db
-    .prepare("SELECT id, user_id, title, created_at, updated_at FROM chat_sessions WHERE id = ?")
+    .prepare("SELECT id, user_id, title, agent_id, created_at, updated_at FROM chat_sessions WHERE id = ?")
     .bind(id)
     .first();
 
   return mapSessionRow(row);
+}
+
+// Read-only accessor for the agent_* snapshot columns, used exclusively by
+// POST /v1/sessions/:id/messages to build the Workers AI call -- deliberately
+// separate from getSessionById()/mapSessionRow() so the raw system prompt
+// snapshot never leaks into the public session JSON (which only exposes
+// agent_id, mirroring how chat_access roles are surfaced but access details
+// aren't inlined into the session either). Never re-reads AGENTS_DB: once
+// copied at session-creation time, the snapshot lives entirely in chat_sessions.
+export async function getSessionAgentConfig(db, id) {
+  if (!db) {
+    throw new Error("Database not configured");
+  }
+
+  const row = await db
+    .prepare(
+      "SELECT agent_system_prompt, agent_model, agent_temperature, agent_max_tokens, agent_top_p FROM chat_sessions WHERE id = ?"
+    )
+    .bind(id)
+    .first();
+
+  if (!row) return null;
+
+  return {
+    systemPrompt: row.agent_system_prompt ?? null,
+    model: row.agent_model ?? null,
+    temperature: row.agent_temperature ?? null,
+    maxTokens: row.agent_max_tokens ?? null,
+    topP: row.agent_top_p ?? null,
+  };
 }
 
 // Keyset pagination ordered by updated_at desc (ties broken by id desc so the
@@ -123,7 +170,7 @@ export async function listSessionsForUser(db, userId, { limit, cursor } = {}) {
 
   const results = await db
     .prepare(
-      `SELECT cs.id, cs.user_id, cs.title, cs.created_at, cs.updated_at, ca.role
+      `SELECT cs.id, cs.user_id, cs.title, cs.agent_id, cs.created_at, cs.updated_at, ca.role
        FROM chat_sessions cs
        JOIN chat_access ca ON ca.session_id = cs.id
        WHERE ca.user_id = ? ${cursorClause}

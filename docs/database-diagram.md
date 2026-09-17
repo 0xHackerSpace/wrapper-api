@@ -1,6 +1,6 @@
 # Diagrama de Entidades dos Bancos de Dados
 
-Este documento mapeia as tabelas dos quatro D1 do projeto (`dev-auth`, `dev-ingredient`, `dev-graph`, `dev-chat`, ver [ADR 0004](decisions/0004-d1-multiple-databases.md)) e como elas se relacionam. Cada D1 é isolado — não há `FOREIGN KEY` entre bancos diferentes; onde uma tabela referencia um `user_id`/`created_by` de outro D1 (ex.: `graph_access.user_id` → `dev-auth.users.id`), a relação é apenas lógica, aplicada no código do worker, não pelo SQLite.
+Este documento mapeia as tabelas dos cinco D1 do projeto (`dev-auth`, `dev-ingredient`, `dev-graph`, `dev-chat`, `dev-agents`, ver [ADR 0004](decisions/0004-d1-multiple-databases.md)) e como elas se relacionam. Cada D1 é isolado — não há `FOREIGN KEY` entre bancos diferentes; onde uma tabela referencia um `user_id`/`created_by` de outro D1 (ex.: `graph_access.user_id` → `dev-auth.users.id`), a relação é apenas lógica, aplicada no código do worker, não pelo SQLite.
 
 ## dev-auth
 
@@ -152,7 +152,7 @@ Notas:
 
 ## dev-chat
 
-Sessões de chat do `ai-worker`, isoladas do fluxo stateless de `/v1/chat/completions` ([ADR 0019](decisions/0019-ai-worker-chat-sessions.md)), com ACL por sessão a partir da [ADR 0020](decisions/0020-chat-session-sharing-and-pagination.md). Migrations: 0014, 0015.
+Sessões de chat do `ai-worker`, isoladas do fluxo stateless de `/v1/chat/completions` ([ADR 0019](decisions/0019-ai-worker-chat-sessions.md)), com ACL por sessão a partir da [ADR 0020](decisions/0020-chat-session-sharing-and-pagination.md) e colunas de snapshot de agent a partir da [ADR 0022](decisions/0022-agent-registration.md). Migrations: 0014, 0015, 0018.
 
 ```mermaid
 erDiagram
@@ -163,6 +163,12 @@ erDiagram
         text id PK
         text user_id "logico, dev-auth.users.id, metadado historico"
         text title
+        text agent_id "logico, dev-agents.agents.id, sem FK cross-database"
+        text agent_system_prompt "snapshot congelado na criacao"
+        text agent_model "snapshot congelado na criacao"
+        real agent_temperature "snapshot congelado na criacao"
+        integer agent_max_tokens "snapshot congelado na criacao"
+        real agent_top_p "snapshot congelado na criacao"
         datetime created_at
         datetime updated_at
     }
@@ -188,7 +194,43 @@ Notas:
 - `chat_messages.session_id` e `chat_access.session_id` são `ON DELETE CASCADE` a partir de `chat_sessions` (D1 aplica `PRAGMA foreign_keys`, diferente do SQLite padrão).
 - `chat_sessions.user_id` não tem FK física para `dev-auth.users` (D1s são isolados) e, desde a migration 0015, deixou de ser a fonte de autorização — é só metadado histórico de quem criou a sessão. Toda checagem de acesso passa por `chat_access`.
 - `chat_access` é a ACL por sessão (`UNIQUE(session_id, user_id)`), mesmo modelo de `graph_access` ([ADR 0012](decisions/0012-graph-worker-knowledge-graph.md)): papéis `owner`/`editor`/`viewer`, com a invariante de que toda sessão deve manter ao menos um `owner` (aplicada em `chat-db.mjs`, não pelo schema — ver [ADR 0020](decisions/0020-chat-session-sharing-and-pagination.md)). A migration 0015 faz backfill de uma linha `owner` para cada sessão já existente antes dela.
+- `agent_id` e as cinco colunas `agent_*` (migration 0018) são todas nullable e sem `FOREIGN KEY` — `dev-agents` é um D1 separado e D1/SQLite não suporta FK cross-database. Preenchidas apenas quando a sessão é criada com um `agent_id` no corpo; ficam `null` caso contrário. Uma vez copiado, o snapshot nunca é atualizado a partir de `dev-agents` novamente ([ADR 0022](decisions/0022-agent-registration.md)).
 - Índices em `chat_sessions.user_id`, `chat_messages.session_id` e `chat_access.user_id`.
+
+## dev-agents
+
+Agents (configuração de IA reutilizável) do `ai-worker`, exclusivo desse worker ([ADR 0022](decisions/0022-agent-registration.md)). Migration: 0016.
+
+```mermaid
+erDiagram
+    agents ||--o{ agent_access : "controla acesso via"
+
+    agents {
+        text id PK
+        text name
+        text system_prompt
+        text model
+        real temperature "nullable"
+        integer max_tokens "nullable"
+        real top_p "nullable"
+        datetime created_at
+        datetime updated_at
+    }
+
+    agent_access {
+        text id PK
+        text agent_id FK
+        text user_id "logico, dev-auth.users.id"
+        text role "owner | editor | viewer"
+        datetime created_at
+    }
+```
+
+Notas:
+- `agent_access.agent_id` é `ON DELETE CASCADE` a partir de `agents`.
+- `agent_access` é a ACL por agent (`UNIQUE(agent_id, user_id)`), mesmo modelo de `chat_access`/`graph_access`: papéis `owner`/`editor`/`viewer`, com a invariante de que todo agent deve manter ao menos um `owner` (aplicada em `agent-db.mjs`, não pelo schema).
+- Índice em `agent_access.user_id` (listar "meus agents" via join, usado por `listAgentsForUser`).
+- Sem relação física com `dev-chat.chat_sessions.agent_id` — ver nota da seção `dev-chat` acima.
 
 ## Relações lógicas entre bancos (sem FK física)
 
@@ -199,6 +241,8 @@ erDiagram
     ingredients ||--o| nodes : "properties.ingredientId (logico)"
     users ||--o{ chat_sessions : "user_id (logico)"
     users ||--o{ chat_access : "user_id (logico)"
+    users ||--o{ agent_access : "user_id (logico)"
+    agents ||--o| chat_sessions : "agent_id (logico, cross-database)"
 ```
 
-`rag-worker` (Vectorize, fora do D1) e `graphrag-worker` (orquestrador sem estado próprio) não possuem tabelas — não aparecem nos diagramas acima. `dev-chat` é exclusivo do `ai-worker` — nenhum outro worker acessa essas tabelas, diretamente ou via RPC.
+`rag-worker` (Vectorize, fora do D1) e `graphrag-worker` (orquestrador sem estado próprio) não possuem tabelas — não aparecem nos diagramas acima. `dev-chat` e `dev-agents` são exclusivos do `ai-worker` — nenhum outro worker acessa essas tabelas, diretamente ou via RPC.

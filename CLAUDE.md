@@ -186,6 +186,7 @@ Decisões arquiteturais documentadas em `docs/decisions/`:
 - **0019**: Sessões de Chat no `ai-worker` (D1 `dev-chat`, endpoints `/v1/sessions/*`)
 - **0020**: Compartilhamento, paginação e renomear de sessões de chat (`chat_access` ACL, keyset pagination)
 - **0021**: Streaming (SSE) para chat completions e sessões de chat (`stream: true`, `chat.completion.chunk`)
+- **0022**: Cadastro de Agents no `ai-worker` (D1 `dev-agents`, endpoints `/v1/agents/*`, `ai:agents` permission, snapshot congelado em `chat_sessions` via `agent_id` opcional em `POST /v1/sessions`)
 
 Ler antes de propor mudanças significativas em arquitetura.
 

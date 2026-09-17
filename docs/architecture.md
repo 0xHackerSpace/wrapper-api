@@ -52,7 +52,8 @@ Conforme [ADR 0004](decisions/0004-d1-multiple-databases.md), usamos múltiplos 
 - **dev-auth**: Usuários, logs, profiles, permissões (5 migrations)
 - **dev-ingredient**: Ingredientes (1 migration)
 - **dev-graph**: Nodes e edges do grafo de conhecimento (1 migration)
-- **dev-chat**: Sessões, mensagens e ACL de acesso de chat, exclusivo do `ai-worker` (2 migrations, ver [ADR 0019](decisions/0019-ai-worker-chat-sessions.md) e [ADR 0020](decisions/0020-chat-session-sharing-and-pagination.md))
+- **dev-chat**: Sessões, mensagens e ACL de acesso de chat, exclusivo do `ai-worker` (3 migrations, ver [ADR 0019](decisions/0019-ai-worker-chat-sessions.md), [ADR 0020](decisions/0020-chat-session-sharing-and-pagination.md) e [ADR 0022](decisions/0022-agent-registration.md))
+- **dev-agents**: Agents (configuração de IA reutilizável) e ACL de acesso, exclusivo do `ai-worker` (1 migration, ver [ADR 0022](decisions/0022-agent-registration.md))
 
 Cada Worker recebe bindings D1 específicos no `tfvars`; migrations rodam via `wrangler d1 execute --remote`.
 
@@ -109,7 +110,7 @@ Permite integração fácil com SDKs OpenAI e ferramentas existentes sem depend�
 Conforme [ADR 0019](decisions/0019-ai-worker-chat-sessions.md) e [ADR 0020](decisions/0020-chat-session-sharing-and-pagination.md), o `ai-worker` também mantém sessões de chat persistidas em D1 dedicado (`dev-chat`, binding `CHAT_DB`), separado do fluxo stateless de `/v1/chat/completions`:
 
 ```
-POST   /v1/sessions                       - Cria sessão vazia (title: null), criador vira owner
+POST   /v1/sessions                       - Cria sessão vazia (title: null), criador vira owner. Body aceita agent_id opcional (ver ADR 0022)
 GET    /v1/sessions?limit=&cursor=        - Lista sessões que o usuário tem chat_access, paginado, ordenadas por updated_at desc
 GET    /v1/sessions/:id                   - Metadados da sessão + role do chamador (sem messages inline)
 PATCH  /v1/sessions/:id                   - Renomeia a sessão (body { title }, requer editor/owner)
@@ -122,6 +123,25 @@ GET    /v1/sessions/:id/access            - Lista colaboradores da sessão (requ
 ```
 
 Todas exigem JWT Bearer com a permission `ai:chat` (a mesma de `/v1/chat/completions`, nenhuma nova permission foi criada — o papel dentro da sessão já controla o resto). Acesso a cada sessão é controlado por `chat_access` (papéis `owner`/`editor`/`viewer`, mesmo modelo de `graph_access`, [ADR 0012](decisions/0012-graph-worker-knowledge-graph.md)): `owner` lê, escreve, renomeia, gerencia colaboradores e apaga a sessão; `editor` lê, escreve e renomeia; `viewer` só lê. Toda sessão sempre tem ao menos um `owner` (invariante aplicada em `PUT`/`DELETE .../access`). Ator sem nenhuma linha em `chat_access` recebe `404` (não vaza existência da sessão); ator com papel insuficiente recebe `403`. Histórico completo é sempre persistido, mas só as últimas 20 mensagens da sessão são enviadas como contexto para `AI.run()` em cada nova mensagem. `GET /v1/sessions` e `GET /v1/sessions/:id/messages` usam paginação keyset com cursor opaco em base64 (`limit` default 20, máx 100). Conforme [ADR 0021](decisions/0021-chat-streaming.md), `POST /v1/sessions/:id/messages` também aceita `stream: true`: a resposta é enviada como SSE e a mensagem completa do assistente só é persistida (`addMessage` + `touchSession`) depois que o stream termina com sucesso — se falhar no meio, nada do assistente é gravado.
+
+### Agents (configuração de IA reutilizável)
+
+Conforme [ADR 0022](decisions/0022-agent-registration.md), o `ai-worker` também mantém **agents**: uma configuração nomeada e reutilizável (`system_prompt` + `model`/`temperature`/`max_tokens`/`top_p`) persistida em D1 dedicado (`dev-agents`, binding `AGENTS_DB`), separado de `dev-chat`:
+
+```
+POST   /v1/agents                       - Cria agent, criador vira owner automaticamente
+GET    /v1/agents?limit=&cursor=        - Lista agents que o usuário tem agent_access, paginado (mesmo padrão de /v1/sessions)
+GET    /v1/agents/:id                   - Detalhe (qualquer papel; 404 se sem acesso)
+PATCH  /v1/agents/:id                   - Edita campos (requer editor/owner)
+DELETE /v1/agents/:id                   - Apaga o agent (requer owner)
+PUT    /v1/agents/:id/access/:userId    - Concede/atualiza o papel de um colaborador (upsert, requer owner)
+DELETE /v1/agents/:id/access/:userId    - Revoga acesso de alguém (requer owner) ou sai do próprio agent (self)
+GET    /v1/agents/:id/access            - Lista colaboradores do agent (requer viewer+)
+```
+
+Todas exigem JWT Bearer com a permission `ai:agents`, **separada** de `ai:chat` (gerenciar agents é uma capacidade administrativa/de configuração distinta de conversar) e checada antes de qualquer papel em `agent_access`. Acesso a cada agent segue o mesmo modelo `owner`/`editor`/`viewer` de `chat_access`/`graph_access`, com a mesma invariante de ao menos um `owner`.
+
+`POST /v1/sessions` aceita um `agent_id` opcional no corpo: o `ai-worker` verifica `viewer`+ em `agent_access` para aquele agent (404 se inexistente ou sem acesso) e copia `system_prompt`/`model`/`temperature`/`max_tokens`/`top_p` como um **snapshot congelado** para as colunas `agent_*` da sessão, em `dev-chat`. `POST /v1/sessions/:id/messages` usa sempre esse snapshot (nunca reconsulta `dev-agents`) — editar ou apagar o agent depois não afeta sessões já criadas.
 
 ## RAG Worker (retrieval-augmented generation)
 

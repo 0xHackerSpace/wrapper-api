@@ -9,6 +9,7 @@
 @baseUrlGraphRAG=https://dev-graphrag.0xhackerspace.workers.dev
 @graphId=COLE_AQUI_O_ID_RETORNADO_POR_POST_/v1/graphs
 @sessionId=COLE_AQUI_O_ID_RETORNADO_POR_POST_/v1/sessions
+@agentId=COLE_AQUI_O_ID_RETORNADO_POR_POST_/v1/agents
 @jwtToken=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIzMjhmMWE3Ny1hNGEzLTRlYTctOWNjMS03OTY1NzEyNTJhNzEiLCJ1c2VybmFtZSI6Imlhbm9saXYiLCJ0eXBlIjoiYWNjZXNzIiwicGVybWlzc2lvbnMiOlsiYXBpOmFjY2VzcyIsImFwaTphY2Nlc3MiLCJhcGk6YWNjZXNzIiwiYXBpOmFjY2VzcyIsImFwaTphY2Nlc3MiLCJhdXRoOmxvZ2luIiwiYXV0aDpsb2dpbiIsImF1dGg6bG9naW4iLCJhdXRoOmxvZ2luIiwiYXV0aDpsb2dpbiIsImF1dGg6bG9naW4iLCJhdXRoOmxvZ2luIiwiYXV0aDpsb2dpbiIsImF1dGg6bG9nb3V0IiwiYXV0aDpsb2dvdXQiLCJhdXRoOmxvZ291dCIsImF1dGg6bG9nb3V0IiwiYXV0aDpsb2dvdXQiLCJhdXRoOmxvZ291dCIsImF1dGg6bG9nb3V0IiwiZ3JhcGg6cmVhZCIsImdyYXBoOnJlYWQiLCJncmFwaDpyZWFkIiwiZ3JhcGg6d3JpdGUiLCJncmFwaDp3cml0ZSIsImluZ3JlZGllbnQ6Y3JlYXRlIiwiaW5ncmVkaWVudDpjcmVhdGUiLCJpbmdyZWRpZW50OmRlbGV0ZSIsImluZ3JlZGllbnQ6ZGVsZXRlIiwiaW5ncmVkaWVudDpyZWFkIiwiaW5ncmVkaWVudDpyZWFkIiwiaW5ncmVkaWVudDpyZWFkIiwiaW5ncmVkaWVudDp1cGRhdGUiLCJpbmdyZWRpZW50OnVwZGF0ZSIsInBlcm1pc3Npb246Y3JlYXRlIiwicGVybWlzc2lvbjpkZWxldGUiLCJwZXJtaXNzaW9uOnJlYWQiLCJwZXJtaXNzaW9uOnVwZGF0ZSIsInByb2ZpbGU6Y3JlYXRlIiwicHJvZmlsZTpkZWxldGUiLCJwcm9maWxlOnJlYWQiLCJwcm9maWxlOnVwZGF0ZSIsInJhZzppbmdlc3QiLCJyYWc6aW5nZXN0IiwicmFnOnF1ZXJ5IiwicmFnOnF1ZXJ5IiwicmFnOnF1ZXJ5IiwicmFnOnF1ZXJ5IiwidXNlcjpjcmVhdGUiLCJ1c2VyOmRlbGV0ZSIsInVzZXI6cmVhZCIsInVzZXI6cmVhZCIsInVzZXI6dXBkYXRlIl0sInByb2ZpbGVzIjpbIkFkbWluIiwiQVBJIFVzZXIiLCJHcmFwaCBVc2VyIiwiR3Vlc3QiLCJJbmdyZWRpZW50IEFkbWluIiwiSW5ncmVkaWVudCBVc2VyIiwiUkFHIFVzZXIiLCJVc2VyIl0sImlhdCI6MTc4OTIwMTMxMiwiZXhwIjoxNzg5MjA0OTEyfQ.VA7SGv-bZ6Aw3uW0Ii3GJvtJnKDFLcRkiHzUtm2KODc
 
 ### ============================================
@@ -251,6 +252,15 @@ Authorization: Bearer token-de-usuario-sem-permissao-ai-chat
 POST {{baseUrlAI}}/v1/sessions
 Authorization: Bearer {{jwtToken}}
 
+### Create a chat session bound to an agent (agent_id optional; requires viewer+ in agent_access, config is snapshotted at creation time, ADR 0022)
+POST {{baseUrlAI}}/v1/sessions
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "agent_id": "{{agentId}}"
+}
+
 ### List sessions the authenticated user has chat_access to, paginated (ordered by updated_at desc)
 GET {{baseUrlAI}}/v1/sessions?limit=20
 Authorization: Bearer {{jwtToken}}
@@ -349,6 +359,112 @@ Authorization: Bearer {{jwtToken}}
 ### Session that doesn't exist or you have no chat_access to (expect 404)
 GET {{baseUrlAI}}/v1/sessions/00000000-0000-0000-0000-000000000000
 Authorization: Bearer {{jwtToken}}
+
+### --- Agents (ai:agents, config de IA reutilizavel, acesso via agent_access: owner/editor/viewer) ---
+
+### Create an agent (creator becomes owner)
+POST {{baseUrlAI}}/v1/agents
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "name": "Assistente de receitas",
+  "system_prompt": "Você é um assistente útil e amigável que responde perguntas sobre culinária de forma clara e concisa, sempre em português.",
+  "model": "@cf/mistral/mistral-7b-instruct-v0.1",
+  "temperature": 0.7,
+  "max_tokens": 512
+}
+
+### List agents the authenticated user has agent_access to, paginated (ordered by updated_at desc)
+GET {{baseUrlAI}}/v1/agents?limit=20
+Authorization: Bearer {{jwtToken}}
+
+### List agents, next page (cursor copiado do next_cursor da resposta anterior)
+GET {{baseUrlAI}}/v1/agents?limit=20&cursor=COLE_AQUI_O_NEXT_CURSOR
+Authorization: Bearer {{jwtToken}}
+
+### Get agent detail + caller's role (404 if it doesn't exist or you have no access)
+GET {{baseUrlAI}}/v1/agents/{{agentId}}
+Authorization: Bearer {{jwtToken}}
+
+### Update an agent's fields (requires editor/owner role)
+PATCH {{baseUrlAI}}/v1/agents/{{agentId}}
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "system_prompt": "Você é um assistente útil e amigável, especialista em culinária mediterrânea, sempre em português.",
+  "temperature": 0.5
+}
+
+### Delete an agent (requires owner; existing sessions keep their snapshot, unaffected)
+DELETE {{baseUrlAI}}/v1/agents/{{agentId}}
+Authorization: Bearer {{jwtToken}}
+
+### --- Collaborators (agent_access: owner/editor/viewer, mesmo modelo do graph-worker/chat) ---
+
+### Grant/update a collaborator's role (upsert, owner-only)
+PUT {{baseUrlAI}}/v1/agents/{{agentId}}/access/00000000-0000-0000-0000-00000000userB
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "role": "editor"
+}
+
+### List collaborators of the agent (any role, viewer+)
+GET {{baseUrlAI}}/v1/agents/{{agentId}}/access
+Authorization: Bearer {{jwtToken}}
+
+### Remove a collaborator's access (owner-only when it's someone else)
+DELETE {{baseUrlAI}}/v1/agents/{{agentId}}/access/00000000-0000-0000-0000-00000000userB
+Authorization: Bearer {{jwtToken}}
+
+### Leave an agent yourself (self-removal, any role, no owner check)
+DELETE {{baseUrlAI}}/v1/agents/{{agentId}}/access/00000000-0000-0000-0000-00000000userA
+Authorization: Bearer {{jwtToken}}
+
+### viewer trying to PATCH an agent (expect 403, not 404 -- they already know the agent exists)
+PATCH {{baseUrlAI}}/v1/agents/{{agentId}}
+Content-Type: application/json
+Authorization: Bearer token-de-usuario-viewer-neste-agent
+
+{
+  "name": "Tentativa de edição"
+}
+
+### Downgrading or removing the sole owner of the agent (expect 409, "Agent must have at least one owner")
+PUT {{baseUrlAI}}/v1/agents/{{agentId}}/access/00000000-0000-0000-0000-00000000userA
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "role": "viewer"
+}
+
+### Agent that doesn't exist or you have no agent_access to (expect 404)
+GET {{baseUrlAI}}/v1/agents/00000000-0000-0000-0000-000000000000
+Authorization: Bearer {{jwtToken}}
+
+### Creating an agent or listing agents with a valid token that lacks ai:agents (e.g. profile User, expect 403)
+POST {{baseUrlAI}}/v1/agents
+Content-Type: application/json
+Authorization: Bearer token-de-usuario-sem-permissao-ai-agents
+
+{
+  "name": "Assistente de receitas",
+  "system_prompt": "Você é um assistente útil.",
+  "model": "@cf/mistral/mistral-7b-instruct-v0.1"
+}
+
+### Creating a session with an agent_id you have no access to (expect 404, not 403 -- non-leaking semantics)
+POST {{baseUrlAI}}/v1/sessions
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "agent_id": "00000000-0000-0000-0000-000000000000"
+}
 
 ### ============================================
 ### GRAPH WORKER (knowledge graph)
