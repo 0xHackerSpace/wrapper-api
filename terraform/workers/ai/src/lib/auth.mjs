@@ -7,6 +7,14 @@ export class AuthError extends Error {
   }
 }
 
+// Shared "would violate an ACL invariant" error (e.g. removing the last
+// owner of a chat session or agent). Declared once here and re-exported by
+// chat-db.mjs/agent-db.mjs -- same reasoning as ValidationError living in
+// ai.mjs and being re-exported everywhere else -- so index.mjs's single
+// `error instanceof ConflictError` check in its catch block works no matter
+// which domain module actually threw it.
+export class ConflictError extends Error {}
+
 export async function extractToken(request) {
   const authHeader = request.headers.get("authorization");
 
