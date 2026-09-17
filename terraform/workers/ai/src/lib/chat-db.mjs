@@ -26,6 +26,11 @@ function mapSessionRow(row) {
     user_id: row.user_id,
     title: row.title ?? null,
     agent_id: row.agent_id ?? null,
+    // docs/specs/agent-teams.md: a session references at most one of
+    // agent_id/team_id (mutually exclusive, enforced in index.mjs at
+    // creation). Unlike agent_id, team_id is never snapshotted -- see
+    // createSession()'s comment below.
+    team_id: row.team_id ?? null,
     created_at: row.created_at,
     updated_at: row.updated_at,
     ...(row.role !== undefined ? { role: row.role } : {}),
@@ -39,6 +44,10 @@ function mapMessageRow(row) {
     session_id: row.session_id,
     role: row.role,
     content: row.content,
+    // docs/specs/agent-teams.md: which team member produced this message,
+    // when it comes from a team orchestration turn; null for single-agent
+    // or agent-less sessions/messages (unchanged behavior).
+    agent_id: row.agent_id ?? null,
     created_at: row.created_at,
   };
 }
@@ -74,8 +83,12 @@ function clampLimit(limit) {
 // agent_* columns (docs/specs/agent-registration.md) -- the caller
 // (index.mjs's handleCreateSession) is responsible for resolving and
 // authorizing the agent via agent-db.mjs *before* calling this; createSession
-// itself never touches AGENTS_DB.
-export async function createSession(db, { userId, agentSnapshot = null }) {
+// itself never touches AGENTS_DB. `teamId`, when present, is only ever
+// written as-is (a *live* reference, docs/specs/agent-teams.md, "referência
+// viva") -- there is no team snapshot to build, unlike agentSnapshot.
+// agent_id/team_id mutual exclusivity is validated by the caller
+// (index.mjs), not here.
+export async function createSession(db, { userId, agentSnapshot = null, teamId = null }) {
   if (!db) {
     throw new Error("Database not configured");
   }
@@ -97,8 +110,8 @@ export async function createSession(db, { userId, agentSnapshot = null }) {
 
   await db
     .prepare(
-      `INSERT INTO chat_sessions (id, user_id, agent_id, agent_system_prompt, agent_model, agent_temperature, agent_max_tokens, agent_top_p, agent_tools, agent_max_tool_iterations, agent_graph_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO chat_sessions (id, user_id, agent_id, agent_system_prompt, agent_model, agent_temperature, agent_max_tokens, agent_top_p, agent_tools, agent_max_tool_iterations, agent_graph_id, team_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .bind(
       id,
@@ -111,7 +124,8 @@ export async function createSession(db, { userId, agentSnapshot = null }) {
       agentTopP,
       agentTools,
       agentMaxToolIterations,
-      agentGraphId
+      agentGraphId,
+      teamId
     )
     .run();
 
@@ -134,7 +148,7 @@ export async function getSessionById(db, id) {
   }
 
   const row = await db
-    .prepare("SELECT id, user_id, title, agent_id, created_at, updated_at FROM chat_sessions WHERE id = ?")
+    .prepare("SELECT id, user_id, title, agent_id, team_id, created_at, updated_at FROM chat_sessions WHERE id = ?")
     .bind(id)
     .first();
 
@@ -192,7 +206,7 @@ export async function listSessionsForUser(db, userId, { limit, cursor } = {}) {
 
   const results = await db
     .prepare(
-      `SELECT cs.id, cs.user_id, cs.title, cs.agent_id, cs.created_at, cs.updated_at, ca.role
+      `SELECT cs.id, cs.user_id, cs.title, cs.agent_id, cs.team_id, cs.created_at, cs.updated_at, ca.role
        FROM chat_sessions cs
        JOIN chat_access ca ON ca.session_id = cs.id
        WHERE ca.user_id = ? ${cursorClause}
@@ -231,7 +245,7 @@ export async function listMessagesPage(db, sessionId, { limit, cursor } = {}) {
 
   const results = await db
     .prepare(
-      `SELECT cm.id, cm.session_id, cm.role, cm.content, cm.created_at
+      `SELECT cm.id, cm.session_id, cm.role, cm.content, cm.agent_id, cm.created_at
        FROM chat_messages cm
        WHERE cm.session_id = ? ${cursorClause}
        ORDER BY cm.created_at ASC, cm.id ASC
@@ -260,14 +274,19 @@ export async function listRecentMessages(db, sessionId, limit = CONTEXT_WINDOW_S
   }
 
   const results = await db
-    .prepare("SELECT id, session_id, role, content, created_at FROM chat_messages WHERE session_id = ? ORDER BY created_at DESC LIMIT ?")
+    .prepare("SELECT id, session_id, role, content, agent_id, created_at FROM chat_messages WHERE session_id = ? ORDER BY created_at DESC LIMIT ?")
     .bind(sessionId, limit)
     .all();
 
   return (results.results || []).map(mapMessageRow).reverse();
 }
 
-export async function addMessage(db, { sessionId, role, content }) {
+// `agentId` (docs/specs/agent-teams.md) tags which team member produced this
+// message when called from within a team orchestration turn (lib/agent-turn.mjs,
+// lib/team-orchestration.mjs); omitted (null) for every other caller, which is
+// every call site that predates teams -- zero behavior change for
+// single-agent/agent-less sessions.
+export async function addMessage(db, { sessionId, role, content, agentId = null }) {
   if (!db) {
     throw new Error("Database not configured");
   }
@@ -275,12 +294,12 @@ export async function addMessage(db, { sessionId, role, content }) {
   const id = crypto.randomUUID();
 
   await db
-    .prepare("INSERT INTO chat_messages (id, session_id, role, content) VALUES (?, ?, ?, ?)")
-    .bind(id, sessionId, role, content)
+    .prepare("INSERT INTO chat_messages (id, session_id, role, content, agent_id) VALUES (?, ?, ?, ?, ?)")
+    .bind(id, sessionId, role, content, agentId)
     .run();
 
   const row = await db
-    .prepare("SELECT id, session_id, role, content, created_at FROM chat_messages WHERE id = ?")
+    .prepare("SELECT id, session_id, role, content, agent_id, created_at FROM chat_messages WHERE id = ?")
     .bind(id)
     .first();
 

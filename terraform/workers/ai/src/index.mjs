@@ -3,13 +3,12 @@ import { json, badRequest, notFound, internalError, conflict } from "./lib/respo
 import {
   chatCompletion,
   chatCompletionStream,
-  chatCompletionWithTools,
   createChatCompletionChunkStream,
   getAvailableModels,
   validateChatCompletionRequest,
   ValidationError,
 } from "./lib/ai.mjs";
-import { TOOL_CATALOG, getToolDefinitions } from "./lib/tools.mjs";
+import { runToolCallingLoop } from "./lib/agent-turn.mjs";
 import { requirePermission, AuthError } from "./lib/auth.mjs";
 import {
   createSession,
@@ -39,6 +38,18 @@ import {
   upsertAgentAccess,
   deleteAgentAccess,
 } from "./lib/agent-db.mjs";
+import {
+  createTeam,
+  getTeamById,
+  listTeamsForUser,
+  updateTeam,
+  deleteTeam,
+  requireRole as requireTeamRole,
+  listTeamAccess,
+  upsertTeamAccess,
+  deleteTeamAccess,
+} from "./lib/team-db.mjs";
+import { runTeamOrchestration } from "./lib/team-orchestration.mjs";
 
 const TITLE_MAX_LENGTH = 50;
 // docs/specs/agent-tool-calling.md: fallback used only when a session's agent
@@ -118,6 +129,30 @@ export default class extends WorkerEntrypoint {
         }
       }
 
+      if (pathname === "/v1/teams" && request.method === "POST") {
+        return await handleCreateTeam(request, this.env);
+      }
+      if (pathname === "/v1/teams" && request.method === "GET") {
+        return await handleListTeams(request, this.env, url);
+      }
+
+      const teamMatch = pathname.match(/^\/v1\/teams\/([^/]+)(?:\/(access)(?:\/([^/]+))?)?$/);
+      if (teamMatch) {
+        const teamId = teamMatch[1];
+        const resource = teamMatch[2];
+        const resourceId = teamMatch[3];
+
+        if (!resource && request.method === "GET") return await handleGetTeam(request, this.env, teamId);
+        if (!resource && request.method === "PATCH") return await handlePatchTeam(request, this.env, teamId);
+        if (!resource && request.method === "DELETE") return await handleDeleteTeam(request, this.env, teamId);
+
+        if (resource === "access") {
+          if (!resourceId && request.method === "GET") return await handleListTeamAccess(request, this.env, teamId);
+          if (resourceId && request.method === "PUT") return await handleGrantTeamAccess(request, this.env, teamId, resourceId);
+          if (resourceId && request.method === "DELETE") return await handleRevokeTeamAccess(request, this.env, teamId, resourceId);
+        }
+      }
+
       return notFound("Endpoint not found");
     } catch (error) {
       if (error instanceof AuthError) {
@@ -169,7 +204,7 @@ function handleInfo() {
       chat_completions:
         "POST /v1/chat/completions (requires auth + ai:chat permission; body { stream: true } returns text/event-stream chat.completion.chunk events instead of a single JSON response)",
       create_session:
-        "POST /v1/sessions (requires auth + ai:chat permission, creator becomes owner; optional body { agent_id } snapshots that agent's system_prompt/model/temperature/max_tokens/top_p onto the session, requires viewer+ role in agent_access, 404 if missing/no access)",
+        "POST /v1/sessions (requires auth + ai:chat permission, creator becomes owner; optional body { agent_id } snapshots that agent's system_prompt/model/temperature/max_tokens/top_p onto the session, requires viewer+ role in agent_access, 404 if missing/no access; optional body { team_id } instead references a team live -- no snapshot, requires viewer+ role in team_access, 404 if missing/no access; agent_id and team_id are mutually exclusive, 400 if both are sent)",
       list_sessions: "GET /v1/sessions?limit=&cursor= (requires auth + ai:chat permission, lists sessions you have chat_access to, ordered by updated_at desc)",
       get_session: "GET /v1/sessions/:id (requires auth + ai:chat permission + viewer+ role; metadata only, no messages)",
       rename_session: "PATCH /v1/sessions/:id (requires auth + ai:chat permission + editor/owner role, body { title })",
@@ -188,6 +223,15 @@ function handleInfo() {
       grant_agent_access: "PUT /v1/agents/:id/access/:userId (requires auth + ai:agents permission + owner role, upserts a collaborator's role)",
       revoke_agent_access: "DELETE /v1/agents/:id/access/:userId (requires auth + ai:agents permission + owner role, or self-removal)",
       list_agent_access: "GET /v1/agents/:id/access (requires auth + ai:agents permission + viewer+ role)",
+      create_team:
+        "POST /v1/teams (requires auth + ai:teams permission, creator becomes owner; body { name, orchestration_mode, members, lead_agent_id, rounds, termination_strategy, max_orchestrator_steps } -- required fields vary by orchestration_mode, see docs/specs/agent-teams.md)",
+      list_teams: "GET /v1/teams?limit=&cursor= (requires auth + ai:teams permission, lists teams you have team_access to, ordered by updated_at desc)",
+      get_team: "GET /v1/teams/:id (requires auth + ai:teams permission + viewer+ role; includes the ordered members list)",
+      patch_team: "PATCH /v1/teams/:id (requires auth + ai:teams permission + editor/owner role; sending members replaces the whole list)",
+      delete_team: "DELETE /v1/teams/:id (requires auth + ai:teams permission + owner role; does not delete the member agents)",
+      grant_team_access: "PUT /v1/teams/:id/access/:userId (requires auth + ai:teams permission + owner role, upserts a collaborator's role)",
+      revoke_team_access: "DELETE /v1/teams/:id/access/:userId (requires auth + ai:teams permission + owner role, or self-removal)",
+      list_team_access: "GET /v1/teams/:id/access (requires auth + ai:teams permission + viewer+ role)",
     },
     documentation: "https://platform.openai.com/docs/api-reference",
   });
@@ -253,6 +297,13 @@ async function streamChatCompletionResponse(ai, validated) {
 // to createSession() -- see docs/specs/agent-registration.md. Missing agent
 // or no access both return 404 (not 403), same non-leaking semantics as
 // chat_access/agent_access elsewhere. Without agent_id, behavior is unchanged.
+//
+// Optional body { team_id } (docs/specs/agent-teams.md): same viewer+ ACL
+// check, this time against team_access, but *no* snapshot -- team_id is
+// stored as a live reference (createSession's teamId param), since a team
+// always runs with its current members/config, never a frozen copy.
+// Mutually exclusive with agent_id: sending both is a 400, checked before
+// either DB lookup happens.
 async function handleCreateSession(request, env) {
   const payload = await requirePermission(request, env, "ai:chat");
 
@@ -261,7 +312,11 @@ async function handleCreateSession(request, env) {
   }
 
   const body = await request.json();
-  const { agent_id: agentId } = body || {};
+  const { agent_id: agentId, team_id: teamId } = body || {};
+
+  if (agentId && teamId) {
+    throw new ValidationError("agent_id and team_id are mutually exclusive");
+  }
 
   let agentSnapshot = null;
   if (agentId) {
@@ -292,9 +347,26 @@ async function handleCreateSession(request, env) {
     };
   }
 
-  const session = await createSession(env.CHAT_DB, { userId: payload.sub, agentSnapshot });
+  let resolvedTeamId = null;
+  if (teamId) {
+    if (!env.AGENTS_DB) {
+      return internalError("Agents database not configured");
+    }
 
-  return json({ id: session.id, title: session.title, agent_id: session.agent_id, created_at: session.created_at }, 201);
+    const role = await requireTeamRole(env.AGENTS_DB, teamId, payload.sub, "viewer");
+    if (!role) {
+      return notFound("Team not found");
+    }
+
+    resolvedTeamId = teamId;
+  }
+
+  const session = await createSession(env.CHAT_DB, { userId: payload.sub, agentSnapshot, teamId: resolvedTeamId });
+
+  return json(
+    { id: session.id, title: session.title, agent_id: session.agent_id, team_id: session.team_id, created_at: session.created_at },
+    201
+  );
 }
 
 async function handleListSessions(request, env, url) {
@@ -395,6 +467,19 @@ async function handleSendMessage(request, env, sessionId) {
 
   await addMessage(env.CHAT_DB, { sessionId, role: "user", content });
 
+  // docs/specs/agent-teams.md: a session with a team_id delegates the whole
+  // request to the orchestration engine instead of the single-agent path
+  // below. Sessions without a team_id (the overwhelming majority, and every
+  // session that predates teams) fall straight through, unchanged.
+  const session = await getSessionById(env.CHAT_DB, sessionId);
+  if (session?.team_id) {
+    return await handleTeamSendMessage(env, sessionId, session.team_id, {
+      userContent: content,
+      actorSub: payload.sub,
+      stream: stream === true,
+    });
+  }
+
   // Persists everything, but only sends the last CONTEXT_WINDOW_SIZE messages
   // (already includes the message just persisted above) to the model, so
   // long sessions don't blow past the model's context limit.
@@ -444,6 +529,42 @@ async function handleSendMessage(request, env, sessionId) {
     session_id: sessionId,
     message: { role: "assistant", content: assistantContent },
     usage: result.usage,
+  });
+}
+
+// docs/specs/agent-teams.md: runs the full multi-agent orchestration (any of
+// the 3 modes) for one incoming user message, then either returns the final
+// answer as JSON or -- for stream: true -- replays the exact final prompt
+// (messagesForFinalCall/aiOptions from runTeamOrchestration) through the
+// existing streamSendMessageResponse() path, same "only the resolved final
+// answer is ever streamed" rule already used by handleToolCallingSendMessage.
+// Unlike the single-agent path, the non-streaming final content is *not*
+// persisted again here: runTeamOrchestration's own per-turn calls (via
+// lib/agent-turn.mjs's runAgentTurn) already persisted it, tagged with the
+// producing agent's id -- adding a second, untagged copy here would just
+// duplicate the last transcript entry.
+async function handleTeamSendMessage(env, sessionId, teamId, { userContent, actorSub, stream }) {
+  if (!env.AGENTS_DB) {
+    return internalError("Agents database not configured");
+  }
+
+  const { content: assistantContent, usage, messagesForFinalCall, aiOptions } = await runTeamOrchestration(env, {
+    sessionId,
+    teamId,
+    userContent,
+    actorSub,
+  });
+
+  if (stream) {
+    return await streamSendMessageResponse(env, sessionId, messagesForFinalCall, { aiOptions, userContent });
+  }
+
+  await touchSession(env.CHAT_DB, sessionId, { title: userContent.slice(0, TITLE_MAX_LENGTH) });
+
+  return json({
+    session_id: sessionId,
+    message: { role: "assistant", content: assistantContent },
+    usage,
   });
 }
 
@@ -526,77 +647,6 @@ async function handleToolCallingSendMessage(env, sessionId, modelMessages, { aiO
     message: { role: "assistant", content: assistantContent },
     usage: result.usage,
   });
-}
-
-// Model -> tool -> model cycle (docs/specs/agent-tool-calling.md). Each round
-// calls chatCompletionWithTools() -- which, unlike chatCompletion(), preserves
-// the native "system"/"tool" roles Workers AI's function calling requires
-// instead of running them through normalizeMessages(). `tools` is only ever
-// passed while the iteration budget isn't exhausted (`cycle < maxIterations`):
-// once it is, one last call is made *without* tools, forcing a text answer
-// (spec step 4) -- its result is treated as final unconditionally, even if
-// the model still tries to call a tool (unverified Workers AI behavior, see
-// spec's "Casos a verificar"). Every intermediate assistant (tool-call
-// request) and tool (result) message is persisted via addMessage() so the
-// full exchange survives in chat_messages, same as the eventual final reply.
-// Returns the exact message array that produced the final result too, so a
-// streaming caller can replay the identical prompt with stream: true.
-//
-// docs/specs/agent-graph-tool.md: `actorSub`/`graphId` (the session's real
-// user and the agent's snapshotted graph_id) are resolved once here, into a
-// single `context` object passed to every tool.execute() call in this loop --
-// not per tool call, and never from the model's own arguments. Tools that
-// don't need it (query_knowledge_base) simply ignore it.
-async function runToolCallingLoop(env, sessionId, initialMessages, { model, temperature, max_tokens, top_p, toolNames, maxIterations, actorSub, graphId }) {
-  const toolDefinitions = getToolDefinitions(toolNames);
-  const context = { actorSub, graphId };
-  let messages = [...initialMessages];
-  let cycle = 0;
-
-  while (true) {
-    const useTools = cycle < maxIterations;
-
-    const result = await chatCompletionWithTools(env.AI, messages, {
-      model,
-      temperature,
-      max_tokens,
-      top_p,
-      tools: useTools ? toolDefinitions : null,
-    });
-
-    if (!useTools || !result.toolCalls || result.toolCalls.length === 0) {
-      return { result, messagesForFinalCall: messages };
-    }
-
-    await addMessage(env.CHAT_DB, {
-      sessionId,
-      role: "assistant",
-      content: JSON.stringify({ tool_calls: result.toolCalls }),
-    });
-    messages = [...messages, { role: "assistant", content: result.content ?? "", tool_calls: result.toolCalls }];
-
-    for (const toolCall of result.toolCalls) {
-      const { name } = toolCall;
-      const args = toolCall.arguments || {};
-      const tool = TOOL_CATALOG[name];
-
-      // A failing tool (unknown name, RPC error, missing binding) never
-      // aborts the request -- it becomes an error result fed back to the
-      // model as a normal tool message, and the loop continues.
-      let toolResultContent;
-      try {
-        if (!tool) throw new Error(`Unknown tool: ${name}`);
-        toolResultContent = JSON.stringify(await tool.execute(env, args, context));
-      } catch (error) {
-        toolResultContent = JSON.stringify({ error: error.message });
-      }
-
-      await addMessage(env.CHAT_DB, { sessionId, role: "tool", content: toolResultContent });
-      messages = [...messages, { role: "tool", name, content: toolResultContent }];
-    }
-
-    cycle += 1;
-  }
 }
 
 async function handleListMessages(request, env, sessionId, url) {
@@ -831,6 +881,165 @@ async function handleListAgentAccess(request, env, agentId) {
   }
 
   const access = await listAgentAccess(env.AGENTS_DB, agentId);
+
+  return json({ success: true, data: access, count: access.length });
+}
+
+// --- Teams (docs/specs/agent-teams.md) ---
+// Mirrors the /v1/agents* handlers above: ai:teams is a separate RBAC
+// permission from ai:agents/ai:chat (checked first, independent of any
+// team_access role), and team_access follows the exact same
+// owner/editor/viewer + "always >=1 owner" model as agent_access/chat_access.
+// Lives in the same D1 binding as agents (AGENTS_DB) -- docs/specs/agent-teams.md:
+// team_members.agent_id is a real FK within dev-agents, not a cross-database
+// reference.
+
+async function handleCreateTeam(request, env) {
+  const payload = await requirePermission(request, env, "ai:teams");
+
+  if (!env.AGENTS_DB) {
+    return internalError("Agents database not configured");
+  }
+
+  const body = await request.json();
+  const team = await createTeam(env.AGENTS_DB, { userId: payload.sub, ...body });
+
+  return json(team, 201);
+}
+
+async function handleListTeams(request, env, url) {
+  const payload = await requirePermission(request, env, "ai:teams");
+
+  if (!env.AGENTS_DB) {
+    return internalError("Agents database not configured");
+  }
+
+  const limit = url.searchParams.get("limit");
+  const cursor = url.searchParams.get("cursor");
+
+  const { data, next_cursor } = await listTeamsForUser(env.AGENTS_DB, payload.sub, { limit, cursor });
+
+  return json({ object: "list", data, next_cursor });
+}
+
+// 404 (not 403) when the actor has no team_access row at all for this team --
+// requireTeamRole() returns null in that case rather than throwing, so a team
+// id never leaks to someone with zero access to it. Once the actor has *some*
+// role, an insufficient one (e.g. viewer trying to PATCH) surfaces as 403
+// instead, since they already know the team exists.
+async function handleGetTeam(request, env, teamId) {
+  const payload = await requirePermission(request, env, "ai:teams");
+
+  if (!env.AGENTS_DB) {
+    return internalError("Agents database not configured");
+  }
+
+  const role = await requireTeamRole(env.AGENTS_DB, teamId, payload.sub, "viewer");
+  if (!role) {
+    return notFound("Team not found");
+  }
+
+  const team = await getTeamById(env.AGENTS_DB, teamId);
+  return json({ ...team, role });
+}
+
+async function handlePatchTeam(request, env, teamId) {
+  const payload = await requirePermission(request, env, "ai:teams");
+
+  if (!env.AGENTS_DB) {
+    return internalError("Agents database not configured");
+  }
+
+  const role = await requireTeamRole(env.AGENTS_DB, teamId, payload.sub, "editor");
+  if (!role) {
+    return notFound("Team not found");
+  }
+
+  const body = await request.json();
+  const team = await updateTeam(env.AGENTS_DB, teamId, body);
+  if (!team) {
+    return notFound("Team not found");
+  }
+
+  return json({ ...team, role });
+}
+
+async function handleDeleteTeam(request, env, teamId) {
+  const payload = await requirePermission(request, env, "ai:teams");
+
+  if (!env.AGENTS_DB) {
+    return internalError("Agents database not configured");
+  }
+
+  const role = await requireTeamRole(env.AGENTS_DB, teamId, payload.sub, "owner");
+  if (!role) {
+    return notFound("Team not found");
+  }
+
+  const removed = await deleteTeam(env.AGENTS_DB, teamId);
+  if (!removed) {
+    return notFound("Team not found");
+  }
+
+  return json({ success: true });
+}
+
+async function handleGrantTeamAccess(request, env, teamId, targetUserId) {
+  const payload = await requirePermission(request, env, "ai:teams");
+
+  if (!env.AGENTS_DB) {
+    return internalError("Agents database not configured");
+  }
+
+  const role = await requireTeamRole(env.AGENTS_DB, teamId, payload.sub, "owner");
+  if (!role) {
+    return notFound("Team not found");
+  }
+
+  const body = await request.json();
+  const { role: newRole } = body;
+
+  const access = await upsertTeamAccess(env.AGENTS_DB, teamId, targetUserId, newRole);
+
+  return json({ success: true, data: access });
+}
+
+async function handleRevokeTeamAccess(request, env, teamId, targetUserId) {
+  const payload = await requirePermission(request, env, "ai:teams");
+
+  if (!env.AGENTS_DB) {
+    return internalError("Agents database not configured");
+  }
+
+  const isSelf = payload.sub === targetUserId;
+
+  if (isSelf) {
+    const team = await getTeamById(env.AGENTS_DB, teamId);
+    if (!team) return notFound("Team not found");
+  } else {
+    const role = await requireTeamRole(env.AGENTS_DB, teamId, payload.sub, "owner");
+    if (!role) return notFound("Team not found");
+  }
+
+  const removed = await deleteTeamAccess(env.AGENTS_DB, teamId, targetUserId);
+  if (!removed) return notFound("Access not found");
+
+  return json({ success: true });
+}
+
+async function handleListTeamAccess(request, env, teamId) {
+  const payload = await requirePermission(request, env, "ai:teams");
+
+  if (!env.AGENTS_DB) {
+    return internalError("Agents database not configured");
+  }
+
+  const role = await requireTeamRole(env.AGENTS_DB, teamId, payload.sub, "viewer");
+  if (!role) {
+    return notFound("Team not found");
+  }
+
+  const access = await listTeamAccess(env.AGENTS_DB, teamId);
 
   return json({ success: true, data: access, count: access.length });
 }

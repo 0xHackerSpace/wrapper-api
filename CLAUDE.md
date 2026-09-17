@@ -189,6 +189,7 @@ Decisões arquiteturais documentadas em `docs/decisions/`:
 - **0022**: Cadastro de Agents no `ai-worker` (D1 `dev-agents`, endpoints `/v1/agents/*`, `ai:agents` permission, snapshot congelado em `chat_sessions` via `agent_id` opcional em `POST /v1/sessions`)
 - **0023**: Tool calling para agents no `ai-worker` (function calling nativo via `@cf/meta/llama-3.1-8b-instruct`, tool `query_knowledge_base` via novo Service Binding `RAG_WORKER`, campos `tools`/`max_tool_iterations` no agent)
 - **0024**: Tool `find_node` (grafo) para agents no `ai-worker` (busca exata type+label via novo Service Binding `GRAPH_WORKER`, campo `graph_id` no agent, `actorSub` = usuário real da sessão)
+- **0025**: Teams de agents no `ai-worker` (D1 `dev-agents`, endpoints `/v1/teams/*`, `ai:teams` permission, 3 modos de orquestração — `pipeline`/`debate`/`orchestrator` — e `team_id` opcional em `POST /v1/sessions`, mutuamente exclusivo com `agent_id`, referência viva sem snapshot)
 
 Ler antes de propor mudanças significativas em arquitetura.
 

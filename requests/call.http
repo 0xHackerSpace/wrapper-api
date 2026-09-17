@@ -10,6 +10,7 @@
 @graphId=COLE_AQUI_O_ID_RETORNADO_POR_POST_/v1/graphs
 @sessionId=COLE_AQUI_O_ID_RETORNADO_POR_POST_/v1/sessions
 @agentId=COLE_AQUI_O_ID_RETORNADO_POR_POST_/v1/agents
+@teamId=COLE_AQUI_O_ID_RETORNADO_POR_POST_/v1/teams
 @jwtToken=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIzMjhmMWE3Ny1hNGEzLTRlYTctOWNjMS03OTY1NzEyNTJhNzEiLCJ1c2VybmFtZSI6Imlhbm9saXYiLCJ0eXBlIjoiYWNjZXNzIiwicGVybWlzc2lvbnMiOlsiYXBpOmFjY2VzcyIsImFwaTphY2Nlc3MiLCJhcGk6YWNjZXNzIiwiYXBpOmFjY2VzcyIsImFwaTphY2Nlc3MiLCJhdXRoOmxvZ2luIiwiYXV0aDpsb2dpbiIsImF1dGg6bG9naW4iLCJhdXRoOmxvZ2luIiwiYXV0aDpsb2dpbiIsImF1dGg6bG9naW4iLCJhdXRoOmxvZ2luIiwiYXV0aDpsb2dpbiIsImF1dGg6bG9nb3V0IiwiYXV0aDpsb2dvdXQiLCJhdXRoOmxvZ291dCIsImF1dGg6bG9nb3V0IiwiYXV0aDpsb2dvdXQiLCJhdXRoOmxvZ291dCIsImF1dGg6bG9nb3V0IiwiZ3JhcGg6cmVhZCIsImdyYXBoOnJlYWQiLCJncmFwaDpyZWFkIiwiZ3JhcGg6d3JpdGUiLCJncmFwaDp3cml0ZSIsImluZ3JlZGllbnQ6Y3JlYXRlIiwiaW5ncmVkaWVudDpjcmVhdGUiLCJpbmdyZWRpZW50OmRlbGV0ZSIsImluZ3JlZGllbnQ6ZGVsZXRlIiwiaW5ncmVkaWVudDpyZWFkIiwiaW5ncmVkaWVudDpyZWFkIiwiaW5ncmVkaWVudDpyZWFkIiwiaW5ncmVkaWVudDp1cGRhdGUiLCJpbmdyZWRpZW50OnVwZGF0ZSIsInBlcm1pc3Npb246Y3JlYXRlIiwicGVybWlzc2lvbjpkZWxldGUiLCJwZXJtaXNzaW9uOnJlYWQiLCJwZXJtaXNzaW9uOnVwZGF0ZSIsInByb2ZpbGU6Y3JlYXRlIiwicHJvZmlsZTpkZWxldGUiLCJwcm9maWxlOnJlYWQiLCJwcm9maWxlOnVwZGF0ZSIsInJhZzppbmdlc3QiLCJyYWc6aW5nZXN0IiwicmFnOnF1ZXJ5IiwicmFnOnF1ZXJ5IiwicmFnOnF1ZXJ5IiwicmFnOnF1ZXJ5IiwidXNlcjpjcmVhdGUiLCJ1c2VyOmRlbGV0ZSIsInVzZXI6cmVhZCIsInVzZXI6cmVhZCIsInVzZXI6dXBkYXRlIl0sInByb2ZpbGVzIjpbIkFkbWluIiwiQVBJIFVzZXIiLCJHcmFwaCBVc2VyIiwiR3Vlc3QiLCJJbmdyZWRpZW50IEFkbWluIiwiSW5ncmVkaWVudCBVc2VyIiwiUkFHIFVzZXIiLCJVc2VyIl0sImlhdCI6MTc4OTIwMTMxMiwiZXhwIjoxNzg5MjA0OTEyfQ.VA7SGv-bZ6Aw3uW0Ii3GJvtJnKDFLcRkiHzUtm2KODc
 
 ### ============================================
@@ -512,6 +513,133 @@ Authorization: Bearer {{jwtToken}}
 
 {
   "agent_id": "00000000-0000-0000-0000-000000000000"
+}
+
+### --- Teams (ai:teams, orquestracao multi-agent, acesso via team_access: owner/editor/viewer) ---
+### Crie ao menos 2-3 agents primeiro (ver secao Agents acima) para usar como members abaixo.
+
+### Create a team with orchestration_mode "pipeline" -- members run in order_index order,
+### each one gets only the original user message + the previous member's output (docs/decisions/0025-agent-teams.md)
+POST {{baseUrlAI}}/v1/teams
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "name": "Pipeline de revisao de receitas",
+  "orchestration_mode": "pipeline",
+  "members": [
+    { "agent_id": "{{agentId}}", "order_index": 0 }
+  ]
+}
+
+### Create a team with orchestration_mode "debate" -- all members see the discussion so far and
+### speak in order each round; lead_agent_id is the moderator/synthesizer, rounds is always the
+### safety ceiling regardless of termination_strategy (docs/decisions/0025-agent-teams.md)
+POST {{baseUrlAI}}/v1/teams
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "name": "Debate de receitas",
+  "orchestration_mode": "debate",
+  "members": [
+    { "agent_id": "{{agentId}}", "order_index": 0 }
+  ],
+  "lead_agent_id": "{{agentId}}",
+  "rounds": 3,
+  "termination_strategy": "moderator"
+}
+
+### Create a team with orchestration_mode "orchestrator" -- lead_agent_id decides, step by step,
+### which other member speaks next (or finishes) via the synthetic select_next_agent tool;
+### max_orchestrator_steps is the safety ceiling (default 10, docs/decisions/0025-agent-teams.md)
+POST {{baseUrlAI}}/v1/teams
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "name": "Coordenador de receitas",
+  "orchestration_mode": "orchestrator",
+  "members": [
+    { "agent_id": "{{agentId}}", "order_index": 0 }
+  ],
+  "lead_agent_id": "{{agentId}}",
+  "max_orchestrator_steps": 10
+}
+
+### List teams the authenticated user has team_access to, paginated (ordered by updated_at desc)
+GET {{baseUrlAI}}/v1/teams?limit=20
+Authorization: Bearer {{jwtToken}}
+
+### Get team detail + ordered members list + caller's role (404 if it doesn't exist or you have no access)
+GET {{baseUrlAI}}/v1/teams/{{teamId}}
+Authorization: Bearer {{jwtToken}}
+
+### Update a team's fields (requires editor/owner role) -- sending members replaces the whole list
+PATCH {{baseUrlAI}}/v1/teams/{{teamId}}
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "rounds": 5
+}
+
+### Delete a team (requires owner; does not delete the member agents)
+DELETE {{baseUrlAI}}/v1/teams/{{teamId}}
+Authorization: Bearer {{jwtToken}}
+
+### --- Collaborators (team_access: owner/editor/viewer, mesmo modelo do graph-worker/chat/agents) ---
+
+### Grant/update a collaborator's role (upsert, owner-only)
+PUT {{baseUrlAI}}/v1/teams/{{teamId}}/access/00000000-0000-0000-0000-00000000userB
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "role": "editor"
+}
+
+### List collaborators of the team (any role, viewer+)
+GET {{baseUrlAI}}/v1/teams/{{teamId}}/access
+Authorization: Bearer {{jwtToken}}
+
+### Remove a collaborator's access (owner-only when it's someone else)
+DELETE {{baseUrlAI}}/v1/teams/{{teamId}}/access/00000000-0000-0000-0000-00000000userB
+Authorization: Bearer {{jwtToken}}
+
+### Creating a team or listing teams with a valid token that lacks ai:teams (e.g. profile User, expect 403)
+POST {{baseUrlAI}}/v1/teams
+Content-Type: application/json
+Authorization: Bearer token-de-usuario-sem-permissao-ai-teams
+
+{
+  "name": "Pipeline de revisao de receitas",
+  "orchestration_mode": "pipeline",
+  "members": [
+    { "agent_id": "{{agentId}}", "order_index": 0 }
+  ]
+}
+
+### Create a chat session bound to a team instead of a single agent (team_id optional; mutually
+### exclusive with agent_id, 400 if both are sent; requires viewer+ in team_access; NO snapshot --
+### team_id is a live reference, so editing the team afterwards changes the next message's behavior,
+### docs/decisions/0025-agent-teams.md)
+POST {{baseUrlAI}}/v1/sessions
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "team_id": "{{teamId}}"
+}
+
+### Sending agent_id and team_id together in POST /v1/sessions (expect 400, mutually exclusive)
+POST {{baseUrlAI}}/v1/sessions
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "agent_id": "{{agentId}}",
+  "team_id": "{{teamId}}"
 }
 
 ### ============================================

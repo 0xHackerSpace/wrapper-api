@@ -110,7 +110,7 @@ Permite integração fácil com SDKs OpenAI e ferramentas existentes sem depend�
 Conforme [ADR 0019](decisions/0019-ai-worker-chat-sessions.md) e [ADR 0020](decisions/0020-chat-session-sharing-and-pagination.md), o `ai-worker` também mantém sessões de chat persistidas em D1 dedicado (`dev-chat`, binding `CHAT_DB`), separado do fluxo stateless de `/v1/chat/completions`:
 
 ```
-POST   /v1/sessions                       - Cria sessão vazia (title: null), criador vira owner. Body aceita agent_id opcional (ver ADR 0022)
+POST   /v1/sessions                       - Cria sessão vazia (title: null), criador vira owner. Body aceita agent_id opcional (ver ADR 0022) ou team_id opcional (ver ADR 0025), mutuamente exclusivos
 GET    /v1/sessions?limit=&cursor=        - Lista sessões que o usuário tem chat_access, paginado, ordenadas por updated_at desc
 GET    /v1/sessions/:id                   - Metadados da sessão + role do chamador (sem messages inline)
 PATCH  /v1/sessions/:id                   - Renomeia a sessão (body { title }, requer editor/owner)
@@ -144,6 +144,33 @@ Todas exigem JWT Bearer com a permission `ai:agents`, **separada** de `ai:chat` 
 `POST /v1/sessions` aceita um `agent_id` opcional no corpo: o `ai-worker` verifica `viewer`+ em `agent_access` para aquele agent (404 se inexistente ou sem acesso) e copia `system_prompt`/`model`/`temperature`/`max_tokens`/`top_p`/`tools`/`max_tool_iterations`/`graph_id` como um **snapshot congelado** para as colunas `agent_*` da sessão, em `dev-chat`. `POST /v1/sessions/:id/messages` usa sempre esse snapshot (nunca reconsulta `dev-agents`) — editar ou apagar o agent depois não afeta sessões já criadas.
 
 **Tool calling** ([ADR 0023](decisions/0023-agent-tool-calling.md)): quando o snapshot da sessão carrega `tools` não-vazio, `POST /v1/sessions/:id/messages` roda o loop modelo→tool→modelo via `chatCompletionWithTools()` em vez do caminho `chatCompletion()`/`chatCompletionStream()` normal — só `@cf/meta/llama-3.1-8b-instruct` tem suporte confirmado a `tools` no catálogo de modelos hoje. Duas tools estão disponíveis: `query_knowledge_base`, que chama `env.RAG_WORKER.query(question, {})` via Service Binding do `ai-worker` para o `rag-worker` (`RAG_WORKER`); e, desde a [ADR 0024](decisions/0024-agent-graph-tool.md), `find_node`, que chama `env.GRAPH_WORKER.findNodeByLabel(graphId, actorSub, type, label)` via um novo Service Binding do `ai-worker` para o `graph-worker` (`GRAPH_WORKER`) — busca exata (`type`+`label`) de um node no grafo snapshotado em `agent.graph_id`, usando sempre o `sub` do usuário real da sessão (`actorSub`) para a checagem de `graph_access`; sem `graph_access` suficiente, o `graph-worker` lança `403`, que vira erro de tool (não aborta a mensagem), mesmo padrão de `query_knowledge_base`. Cada ciclo persiste mensagens `role: "assistant"` (pedido de tool call) e `role: "tool"` (resultado ou erro) em `chat_messages`, além da mensagem final; o loop para ao receber uma resposta sem `tool_calls` ou ao atingir `max_tool_iterations`. Falha ao executar uma tool vira um resultado de erro devolvido ao modelo, sem abortar a request. Com `stream: true`, o loop roda internamente sem streaming e só a resposta final é re-executada em modo streaming para o client (uma chamada extra ao modelo nesse caso). `/v1/chat/completions` não é afetado — tool calling só existe no fluxo de sessões com agent.
+
+## Teams (orquestração multi-agent)
+
+Conforme [ADR 0025](decisions/0025-agent-teams.md), o `ai-worker` também mantém **teams**: um recurso que agrupa múltiplos agents e os coordena para produzir uma resposta a partir de uma mensagem do usuário, persistido no mesmo D1 `dev-agents` (binding `AGENTS_DB`) — diferente do snapshot de agent único, `team_members.agent_id` é uma referência viva com FK real (mesmo D1), porque um team sempre executa com a config atual de seus membros.
+
+```
+POST   /v1/teams                        - Cria team (name, orchestration_mode, members[], lead_agent_id/rounds/termination_strategy/max_orchestrator_steps conforme o modo), criador vira owner
+GET    /v1/teams?limit=&cursor=         - Lista teams que o usuário tem team_access, paginado (mesmo padrão de /v1/agents)
+GET    /v1/teams/:id                    - Detalhe, incluindo a lista ordenada de members (papel mínimo viewer)
+PATCH  /v1/teams/:id                    - Edita campos; enviar members substitui a lista inteira (requer editor/owner)
+DELETE /v1/teams/:id                    - Apaga o team (requer owner); não apaga os agents membros
+PUT    /v1/teams/:id/access/:userId     - Concede/atualiza o papel de um colaborador (upsert, requer owner)
+DELETE /v1/teams/:id/access/:userId     - Revoga acesso de alguém (requer owner) ou sai do próprio team (self)
+GET    /v1/teams/:id/access             - Lista colaboradores do team (requer viewer+)
+```
+
+Todas exigem JWT Bearer com a permission `ai:teams`, **separada** de `ai:agents`/`ai:chat` (montar equipes é uma capacidade administrativa distinta de cadastrar um agent individual) e checada antes de qualquer papel em `team_access`. Acesso a cada team segue o mesmo modelo `owner`/`editor`/`viewer` de `agent_access`/`chat_access`, com a mesma invariante de ao menos um `owner`.
+
+Um team declara `orchestration_mode` (`pipeline` | `debate` | `orchestrator`) na criação, validado com regras próprias por modo (`lead_agent_id`/`rounds`/`termination_strategy`/`max_orchestrator_steps` exigidos ou proibidos conforme o modo; `lead_agent_id` sempre precisa estar em `members`):
+
+- **`pipeline`**: os membros rodam em sequência (`order_index`); cada um recebe só a mensagem original do usuário + a saída do membro anterior (não a cadeia completa). O último produz a resposta final.
+- **`debate`**: todos os membros veem a mensagem original e a discussão acumulada, falando em ordem a cada rodada, até `rounds` rodadas. `termination_strategy: fixed_rounds` sempre roda todas as `rounds` e depois `lead_agent_id` sintetiza a resposta final; `termination_strategy: moderator` consulta `lead_agent_id` após cada rodada (protocolo de texto `[FINAL]`/`[CONTINUE]`, decisão de implementação não coberta pela spec) — `rounds` continua sendo o teto de segurança mesmo que o moderador nunca decida parar.
+- **`orchestrator`**: `lead_agent_id` decide, passo a passo, qual outro membro fala a seguir ou se finaliza, via uma tool sintética `select_next_agent` (montada em runtime, `enum` dinâmico com os nomes dos membros atuais, reaproveitando a infraestrutura de function calling da [ADR 0023](decisions/0023-agent-tool-calling.md)). `max_orchestrator_steps` (default 10) é o teto de segurança; atingido sem `action: "finish"`, uma última chamada é forçada só com a opção de finalizar.
+
+Em qualquer modo, um membro com `tools`/`graph_id` próprios (ADR 0023/0024) roda seu próprio loop de tool calling dentro do turno — orquestração aninhada, com teto independente do teto de rodadas/passos do team. O usuário só vê a resposta final (mesmo formato `{ session_id, message: { role: assistant, content }, usage }` de sempre); o transcript completo (cada fala de cada membro, incluindo os ciclos de tool calling internos) fica persistido em `chat_messages` com a nova coluna `agent_id`, permitindo reconstruir "quem disse o quê" via `GET /v1/sessions/:id/messages`.
+
+`POST /v1/sessions` aceita `team_id` como alternativa a `agent_id` (mutuamente exclusivos, `400` se ambos forem enviados): requer `viewer`+ em `team_access` (404 se inexistente ou sem acesso), mas **sem snapshot** — `chat_sessions.team_id` é gravado como referência viva, então editar o team depois (membros, modo de orquestração) afeta a próxima mensagem de qualquer sessão que o referencie. Trade-off deliberado, oposto ao congelamento de `agent_id`. Conforme [ADR 0021](decisions/0021-chat-streaming.md)/[ADR 0023](decisions/0023-agent-tool-calling.md), `stream: true` também funciona com uma sessão de team: toda a orquestração roda internamente sem streaming e só a resposta final, já resolvida, é re-executada em modo streaming.
 
 ## RAG Worker (retrieval-augmented generation)
 

@@ -136,6 +136,7 @@ function createChatDB(seedSessions = [], seedAccess = [], seedMessages = []) {
             agentTools,
             agentMaxToolIterations,
             agentGraphId,
+            teamId,
           ] = boundArgs;
           const now = nextTimestamp();
           sessions.push({
@@ -151,6 +152,8 @@ function createChatDB(seedSessions = [], seedAccess = [], seedMessages = []) {
             agent_tools: agentTools ?? null,
             agent_max_tool_iterations: agentMaxToolIterations ?? null,
             agent_graph_id: agentGraphId ?? null,
+            // docs/specs/agent-teams.md: live reference, no snapshot columns.
+            team_id: teamId ?? null,
             created_at: now,
             updated_at: now,
           });
@@ -174,8 +177,8 @@ function createChatDB(seedSessions = [], seedAccess = [], seedMessages = []) {
           return { success: true };
         }
         if (sql.startsWith("INSERT INTO chat_messages")) {
-          const [id, sessionId, role, content] = boundArgs;
-          messages.push({ id, session_id: sessionId, role, content, created_at: nextTimestamp() });
+          const [id, sessionId, role, content, agentId] = boundArgs;
+          messages.push({ id, session_id: sessionId, role, content, agent_id: agentId ?? null, created_at: nextTimestamp() });
           return { success: true };
         }
         // touchSession: UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP, title = COALESCE(title, ?) WHERE id = ?
@@ -231,10 +234,10 @@ function createChatDB(seedSessions = [], seedAccess = [], seedMessages = []) {
 
 // Seeds a session plus its chat_access rows directly in the mock D1,
 // mirroring tests/graph-worker.test.mjs's seedGraph() helper.
-function seedSession(db, { id = "s1", userId = "user-1", title = null, owners, editors = [], viewers = [] } = {}) {
+function seedSession(db, { id = "s1", userId = "user-1", title = null, teamId = null, owners, editors = [], viewers = [] } = {}) {
   const ownerIds = owners || [userId];
   const createdAt = db._nextTimestamp();
-  db._sessions.push({ id, user_id: userId, title, agent_id: null, created_at: createdAt, updated_at: createdAt });
+  db._sessions.push({ id, user_id: userId, title, agent_id: null, team_id: teamId, created_at: createdAt, updated_at: createdAt });
   for (const uid of ownerIds) {
     db._access.push({ id: `acc-${id}-${uid}`, session_id: id, user_id: uid, role: "owner", created_at: db._nextTimestamp() });
   }
@@ -247,12 +250,18 @@ function seedSession(db, { id = "s1", userId = "user-1", title = null, owners, e
   return id;
 }
 
-// In-memory mock of AGENTS_DB (dev-agents: agents + agent_access), same
-// substring-matching approach as createChatDB() above. agent_access mirrors
-// chat_access adapted to agents instead of sessions (docs/specs/agent-registration.md).
+// In-memory mock of AGENTS_DB (dev-agents: agents + agent_access + the
+// agent_teams/team_members/team_access tables added by
+// docs/specs/agent-teams.md -- same D1, see team-db.mjs), same
+// substring-matching approach as createChatDB() above. agent_access/team_access
+// mirror chat_access adapted to agents/teams instead of sessions
+// (docs/specs/agent-registration.md, agent-teams.md).
 function createAgentsDB(seedAgents = [], seedAccess = []) {
   const agents = [...seedAgents];
   const access = [...seedAccess];
+  const teams = [];
+  const teamMembers = [];
+  const teamAccess = [];
 
   let clock = 0;
   function nextTimestamp() {
@@ -276,9 +285,59 @@ function createAgentsDB(seedAgents = [], seedAccess = []) {
           const [agentId, userId] = boundArgs;
           return access.find((a) => a.agent_id === agentId && a.user_id === userId) || null;
         }
+        if (sql.includes("FROM agent_teams") && sql.includes("WHERE id = ?")) {
+          const [id] = boundArgs;
+          return teams.find((t) => t.id === id) || null;
+        }
+        if (sql.includes("FROM team_access") && sql.includes("WHERE team_id = ? AND user_id = ?")) {
+          const [teamId, userId] = boundArgs;
+          return teamAccess.find((a) => a.team_id === teamId && a.user_id === userId) || null;
+        }
         return null;
       },
       async all() {
+        if (sql.includes("FROM team_members") && sql.includes("WHERE team_id = ?") && sql.includes("ORDER BY order_index")) {
+          const [teamId] = boundArgs;
+          const results = teamMembers
+            .filter((m) => m.team_id === teamId)
+            .sort((a, b) => a.order_index - b.order_index);
+          return { results };
+        }
+        if (sql.includes("FROM agent_teams t") && sql.includes("JOIN team_access ta")) {
+          const hasCursor = sql.includes("t.updated_at <");
+          const userId = boundArgs[0];
+          let cursorValue = null;
+          let cursorId = null;
+          let limit;
+          if (hasCursor) {
+            [, cursorValue, , cursorId, limit] = boundArgs;
+          } else {
+            [, limit] = boundArgs;
+          }
+
+          let results = teams
+            .filter((t) => teamAccess.some((a) => a.team_id === t.id && a.user_id === userId))
+            .map((t) => ({ ...t, role: teamAccess.find((a) => a.team_id === t.id && a.user_id === userId).role }))
+            .sort((a, b) => {
+              const byUpdated = (b.updated_at || "").localeCompare(a.updated_at || "");
+              return byUpdated !== 0 ? byUpdated : (b.id || "").localeCompare(a.id || "");
+            });
+
+          if (hasCursor) {
+            results = results.filter(
+              (t) => t.updated_at < cursorValue || (t.updated_at === cursorValue && t.id < cursorId)
+            );
+          }
+
+          return { results: results.slice(0, limit) };
+        }
+        if (sql.includes("FROM team_access") && sql.includes("WHERE team_id = ?") && sql.includes("ORDER BY created_at")) {
+          const [teamId] = boundArgs;
+          const results = teamAccess
+            .filter((a) => a.team_id === teamId)
+            .sort((x, y) => (x.created_at || "").localeCompare(y.created_at || ""));
+          return { results };
+        }
         if (sql.includes("FROM agents a") && sql.includes("JOIN agent_access aa")) {
           const hasCursor = sql.includes("a.updated_at <");
           const userId = boundArgs[0];
@@ -382,6 +441,80 @@ function createAgentsDB(seedAgents = [], seedAccess = []) {
           }
           return { success: true };
         }
+        if (sql.startsWith("INSERT INTO agent_teams")) {
+          const [id, name, orchestrationMode, leadAgentId, rounds, terminationStrategy, maxOrchestratorSteps] = boundArgs;
+          const now = nextTimestamp();
+          teams.push({
+            id,
+            name,
+            orchestration_mode: orchestrationMode,
+            lead_agent_id: leadAgentId ?? null,
+            rounds: rounds ?? null,
+            termination_strategy: terminationStrategy ?? null,
+            max_orchestrator_steps: maxOrchestratorSteps ?? null,
+            created_at: now,
+            updated_at: now,
+          });
+          return { success: true };
+        }
+        if (sql.startsWith("INSERT INTO team_members")) {
+          const [id, teamId, agentId, orderIndex] = boundArgs;
+          teamMembers.push({ id, team_id: teamId, agent_id: agentId, order_index: orderIndex });
+          return { success: true };
+        }
+        if (sql.startsWith("DELETE FROM team_members")) {
+          const [teamId] = boundArgs;
+          for (let i = teamMembers.length - 1; i >= 0; i--) {
+            if (teamMembers[i].team_id === teamId) teamMembers.splice(i, 1);
+          }
+          return { success: true };
+        }
+        if (sql.startsWith("INSERT INTO team_access")) {
+          const [id, teamId, userId, role] = boundArgs;
+          teamAccess.push({ id, team_id: teamId, user_id: userId, role, created_at: nextTimestamp() });
+          return { success: true };
+        }
+        if (sql.startsWith("UPDATE team_access")) {
+          const [role, teamId, userId] = boundArgs;
+          const row = teamAccess.find((a) => a.team_id === teamId && a.user_id === userId);
+          if (row) row.role = role;
+          return { success: true };
+        }
+        if (sql.startsWith("DELETE FROM team_access")) {
+          const [teamId, userId] = boundArgs;
+          const index = teamAccess.findIndex((a) => a.team_id === teamId && a.user_id === userId);
+          if (index !== -1) teamAccess.splice(index, 1);
+          return { success: true };
+        }
+        if (sql.startsWith("UPDATE agent_teams")) {
+          const [name, orchestrationMode, leadAgentId, rounds, terminationStrategy, maxOrchestratorSteps, id] = boundArgs;
+          const row = teams.find((t) => t.id === id);
+          if (row) {
+            row.name = name;
+            row.orchestration_mode = orchestrationMode;
+            row.lead_agent_id = leadAgentId ?? null;
+            row.rounds = rounds ?? null;
+            row.termination_strategy = terminationStrategy ?? null;
+            row.max_orchestrator_steps = maxOrchestratorSteps ?? null;
+            row.updated_at = nextTimestamp();
+          }
+          return { success: true };
+        }
+        if (sql.startsWith("DELETE FROM agent_teams")) {
+          const [id] = boundArgs;
+          const index = teams.findIndex((t) => t.id === id);
+          if (index !== -1) {
+            teams.splice(index, 1);
+            // Simulates ON DELETE CASCADE on team_members/team_access (migration 0023).
+            for (let i = teamMembers.length - 1; i >= 0; i--) {
+              if (teamMembers[i].team_id === id) teamMembers.splice(i, 1);
+            }
+            for (let i = teamAccess.length - 1; i >= 0; i--) {
+              if (teamAccess[i].team_id === id) teamAccess.splice(i, 1);
+            }
+          }
+          return { success: true };
+        }
         return { success: false };
       },
     };
@@ -391,6 +524,9 @@ function createAgentsDB(seedAgents = [], seedAccess = []) {
     prepare: (sql) => makeStatement(sql),
     _agents: agents,
     _access: access,
+    _teams: teams,
+    _teamMembers: teamMembers,
+    _teamAccess: teamAccess,
     _nextTimestamp: nextTimestamp,
   };
 }
@@ -439,6 +575,59 @@ function seedAgent(
   }
   for (const uid of viewers) {
     db._access.push({ id: `acc-${id}-${uid}`, agent_id: id, user_id: uid, role: "viewer", created_at: db._nextTimestamp() });
+  }
+  return id;
+}
+
+// Seeds a team plus its team_members and team_access rows directly in the
+// mock D1 (docs/specs/agent-teams.md), mirroring seedAgent()/seedSession()
+// above. `members` is `[{ agentId, orderIndex }]`; orderIndex defaults to
+// position in the array when omitted, same as team-db.mjs's own default.
+function seedTeam(
+  db,
+  {
+    id = "t1",
+    name = "Team",
+    orchestrationMode = "pipeline",
+    leadAgentId = null,
+    rounds = null,
+    terminationStrategy = null,
+    maxOrchestratorSteps = null,
+    members = [],
+    owners,
+    editors = [],
+    viewers = [],
+  } = {}
+) {
+  const ownerIds = owners || ["user-1"];
+  const createdAt = db._nextTimestamp();
+  db._teams.push({
+    id,
+    name,
+    orchestration_mode: orchestrationMode,
+    lead_agent_id: leadAgentId,
+    rounds,
+    termination_strategy: terminationStrategy,
+    max_orchestrator_steps: maxOrchestratorSteps,
+    created_at: createdAt,
+    updated_at: createdAt,
+  });
+  members.forEach((member, index) => {
+    db._teamMembers.push({
+      id: `tm-${id}-${member.agentId}`,
+      team_id: id,
+      agent_id: member.agentId,
+      order_index: member.orderIndex !== undefined ? member.orderIndex : index,
+    });
+  });
+  for (const uid of ownerIds) {
+    db._teamAccess.push({ id: `tacc-${id}-${uid}`, team_id: id, user_id: uid, role: "owner", created_at: db._nextTimestamp() });
+  }
+  for (const uid of editors) {
+    db._teamAccess.push({ id: `tacc-${id}-${uid}`, team_id: id, user_id: uid, role: "editor", created_at: db._nextTimestamp() });
+  }
+  for (const uid of viewers) {
+    db._teamAccess.push({ id: `tacc-${id}-${uid}`, team_id: id, user_id: uid, role: "viewer", created_at: db._nextTimestamp() });
   }
   return id;
 }
@@ -2285,4 +2474,739 @@ test("query_knowledge_base still works unchanged with the new execute(env, args,
 
   assert.equal(sent.status, 200);
   assert.equal(sent.body.message.content, "42.");
+});
+
+// --- Teams: CRUD + ACL (docs/specs/agent-teams.md, agent-teams-out-of-scope.md) ---
+
+test("POST /v1/teams creates a pipeline team and the creator becomes owner", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, { id: "a1", owners: ["user-1"] });
+  seedAgent(agentsDb, { id: "a2", owners: ["user-1"] });
+  const { post } = harness({ AGENTS_DB: agentsDb });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:teams"] });
+
+  const { status, body } = await post(
+    "/v1/teams",
+    { name: "Content Pipeline", orchestration_mode: "pipeline", members: [{ agent_id: "a1" }, { agent_id: "a2" }] },
+    headers
+  );
+
+  assert.equal(status, 201);
+  assert.ok(body.id);
+  assert.equal(body.name, "Content Pipeline");
+  assert.equal(body.orchestration_mode, "pipeline");
+  assert.equal(body.lead_agent_id, null);
+  assert.equal(body.role, "owner");
+  assert.deepEqual(body.members, [
+    { agent_id: "a1", order_index: 0 },
+    { agent_id: "a2", order_index: 1 },
+  ]);
+
+  const access = agentsDb._teamAccess.find((a) => a.team_id === body.id && a.user_id === "user-1");
+  assert.equal(access.role, "owner");
+});
+
+test("team routes require a valid JWT with the ai:teams permission", async () => {
+  const { post } = harness();
+
+  const noToken = await post("/v1/teams", {});
+  assert.equal(noToken.status, 401);
+
+  const withoutPermission = await authHeader({ sub: "user-1", permissions: ["ai:agents"] });
+  const forbidden = await post("/v1/teams", { name: "x", orchestration_mode: "pipeline", members: [] }, withoutPermission);
+  assert.equal(forbidden.status, 403);
+});
+
+test("POST /v1/teams rejects an empty or missing members list", async () => {
+  const { post } = harness();
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:teams"] });
+
+  assert.equal((await post("/v1/teams", { name: "x", orchestration_mode: "pipeline" }, headers)).status, 400);
+  assert.equal((await post("/v1/teams", { name: "x", orchestration_mode: "pipeline", members: [] }, headers)).status, 400);
+});
+
+test("POST /v1/teams pipeline mode rejects lead_agent_id/rounds/termination_strategy/max_orchestrator_steps if sent", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, { id: "a1", owners: ["user-1"] });
+  const { post } = harness({ AGENTS_DB: agentsDb });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:teams"] });
+
+  const base = { name: "x", orchestration_mode: "pipeline", members: [{ agent_id: "a1" }] };
+
+  assert.equal((await post("/v1/teams", { ...base, lead_agent_id: "a1" }, headers)).status, 400);
+  assert.equal((await post("/v1/teams", { ...base, rounds: 3 }, headers)).status, 400);
+  assert.equal((await post("/v1/teams", { ...base, termination_strategy: "fixed_rounds" }, headers)).status, 400);
+  assert.equal((await post("/v1/teams", { ...base, max_orchestrator_steps: 5 }, headers)).status, 400);
+  assert.equal((await post("/v1/teams", base, headers)).status, 201);
+});
+
+test("POST /v1/teams debate mode requires lead_agent_id, rounds and termination_strategy", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, { id: "a1", owners: ["user-1"] });
+  seedAgent(agentsDb, { id: "a2", owners: ["user-1"] });
+  const { post } = harness({ AGENTS_DB: agentsDb });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:teams"] });
+
+  const members = [{ agent_id: "a1" }, { agent_id: "a2" }];
+
+  assert.equal((await post("/v1/teams", { name: "x", orchestration_mode: "debate", members }, headers)).status, 400);
+  assert.equal(
+    (await post("/v1/teams", { name: "x", orchestration_mode: "debate", members, lead_agent_id: "a1" }, headers)).status,
+    400
+  );
+  assert.equal(
+    (await post("/v1/teams", { name: "x", orchestration_mode: "debate", members, lead_agent_id: "a1", rounds: 3 }, headers)).status,
+    400
+  );
+  assert.equal(
+    (
+      await post(
+        "/v1/teams",
+        { name: "x", orchestration_mode: "debate", members, lead_agent_id: "a1", rounds: 3, termination_strategy: "bogus" },
+        headers
+      )
+    ).status,
+    400
+  );
+
+  const { status, body } = await post(
+    "/v1/teams",
+    { name: "x", orchestration_mode: "debate", members, lead_agent_id: "a1", rounds: 3, termination_strategy: "moderator" },
+    headers
+  );
+  assert.equal(status, 201);
+  assert.equal(body.lead_agent_id, "a1");
+  assert.equal(body.rounds, 3);
+  assert.equal(body.termination_strategy, "moderator");
+});
+
+test("POST /v1/teams orchestrator mode requires lead_agent_id and defaults max_orchestrator_steps to 10", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, { id: "a1", owners: ["user-1"] });
+  seedAgent(agentsDb, { id: "a2", owners: ["user-1"] });
+  const { post } = harness({ AGENTS_DB: agentsDb });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:teams"] });
+
+  const members = [{ agent_id: "a1" }, { agent_id: "a2" }];
+
+  assert.equal((await post("/v1/teams", { name: "x", orchestration_mode: "orchestrator", members }, headers)).status, 400);
+
+  const { status, body } = await post(
+    "/v1/teams",
+    { name: "x", orchestration_mode: "orchestrator", members, lead_agent_id: "a1" },
+    headers
+  );
+  assert.equal(status, 201);
+  assert.equal(body.max_orchestrator_steps, 10);
+
+  const explicit = await post(
+    "/v1/teams",
+    { name: "y", orchestration_mode: "orchestrator", members, lead_agent_id: "a1", max_orchestrator_steps: 3 },
+    headers
+  );
+  assert.equal(explicit.status, 201);
+  assert.equal(explicit.body.max_orchestrator_steps, 3);
+});
+
+test("POST /v1/teams rejects a lead_agent_id that isn't one of the team's members", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, { id: "a1", owners: ["user-1"] });
+  seedAgent(agentsDb, { id: "a2", owners: ["user-1"] });
+  const { post } = harness({ AGENTS_DB: agentsDb });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:teams"] });
+
+  const { status, body } = await post(
+    "/v1/teams",
+    { name: "x", orchestration_mode: "orchestrator", members: [{ agent_id: "a1" }], lead_agent_id: "a2" },
+    headers
+  );
+
+  assert.equal(status, 400);
+  assert.match(body.error.message, /lead_agent_id must be one of the team's members/);
+});
+
+test("a user with no team_access row at all gets 404 on every /v1/teams/:id* route", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, { id: "a1", owners: ["user-1"] });
+  seedTeam(agentsDb, { id: "t1", members: [{ agentId: "a1" }], owners: ["user-1"] });
+  const { get, patch, del, put } = harness({ AGENTS_DB: agentsDb });
+  const strangerHeaders = await authHeader({ sub: "user-2", permissions: ["ai:teams"] });
+
+  assert.equal((await get("/v1/teams/t1", strangerHeaders)).status, 404);
+  assert.equal((await patch("/v1/teams/t1", { name: "x" }, strangerHeaders)).status, 404);
+  assert.equal((await del("/v1/teams/t1", strangerHeaders)).status, 404);
+  assert.equal((await get("/v1/teams/t1/access", strangerHeaders)).status, 404);
+  assert.equal((await put("/v1/teams/t1/access/user-3", { role: "viewer" }, strangerHeaders)).status, 404);
+  assert.equal((await del("/v1/teams/t1/access/user-3", strangerHeaders)).status, 404);
+});
+
+test("a viewer can read a team (including its ordered members) but not PATCH or DELETE it (403)", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, { id: "a1", owners: ["user-1"] });
+  seedAgent(agentsDb, { id: "a2", owners: ["user-1"] });
+  seedTeam(agentsDb, { id: "t1", members: [{ agentId: "a2" }, { agentId: "a1" }], owners: ["user-1"], viewers: ["user-2"] });
+  const { get, patch, del } = harness({ AGENTS_DB: agentsDb });
+  const viewerHeaders = await authHeader({ sub: "user-2", permissions: ["ai:teams"] });
+
+  const got = await get("/v1/teams/t1", viewerHeaders);
+  assert.equal(got.status, 200);
+  assert.deepEqual(got.body.members, [
+    { agent_id: "a2", order_index: 0 },
+    { agent_id: "a1", order_index: 1 },
+  ]);
+
+  assert.equal((await patch("/v1/teams/t1", { name: "x" }, viewerHeaders)).status, 403);
+  assert.equal((await del("/v1/teams/t1", viewerHeaders)).status, 403);
+});
+
+test("an editor can PATCH a team (replacing members) but not DELETE it or manage access (403)", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, { id: "a1", owners: ["user-1"] });
+  seedAgent(agentsDb, { id: "a2", owners: ["user-1"] });
+  seedTeam(agentsDb, { id: "t1", members: [{ agentId: "a1" }], owners: ["user-1"], editors: ["user-2"] });
+  const { patch, del, put } = harness({ AGENTS_DB: agentsDb });
+  const editorHeaders = await authHeader({ sub: "user-2", permissions: ["ai:teams"] });
+
+  const patched = await patch("/v1/teams/t1", { members: [{ agent_id: "a1" }, { agent_id: "a2" }] }, editorHeaders);
+  assert.equal(patched.status, 200);
+  assert.equal(patched.body.members.length, 2);
+
+  assert.equal((await del("/v1/teams/t1", editorHeaders)).status, 403);
+  assert.equal((await put("/v1/teams/t1/access/user-3", { role: "viewer" }, editorHeaders)).status, 403);
+});
+
+test("PATCH /v1/teams/:id rejects removing the current lead_agent_id from members without replacing it", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, { id: "a1", owners: ["user-1"] });
+  seedAgent(agentsDb, { id: "a2", owners: ["user-1"] });
+  seedTeam(agentsDb, {
+    id: "t1",
+    orchestrationMode: "debate",
+    leadAgentId: "a1",
+    rounds: 2,
+    terminationStrategy: "fixed_rounds",
+    members: [{ agentId: "a1" }, { agentId: "a2" }],
+    owners: ["user-1"],
+  });
+  const { patch } = harness({ AGENTS_DB: agentsDb });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:teams"] });
+
+  const { status, body } = await patch("/v1/teams/t1", { members: [{ agent_id: "a2" }] }, headers);
+
+  assert.equal(status, 400);
+  assert.match(body.error.message, /lead_agent_id must be one of the team's members/);
+
+  const withNewLead = await patch(
+    "/v1/teams/t1",
+    { members: [{ agent_id: "a2" }], lead_agent_id: "a2" },
+    headers
+  );
+  assert.equal(withNewLead.status, 200);
+  assert.equal(withNewLead.body.lead_agent_id, "a2");
+});
+
+test("DELETE /v1/teams/:id removes the team, its members and its team_access rows, but not the member agents", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, { id: "a1", owners: ["user-1"] });
+  seedTeam(agentsDb, { id: "t1", members: [{ agentId: "a1" }], owners: ["user-1"] });
+  const { del, get } = harness({ AGENTS_DB: agentsDb });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:teams"] });
+
+  const { status, body } = await del("/v1/teams/t1", headers);
+  assert.equal(status, 200);
+  assert.deepEqual(body, { success: true });
+
+  assert.equal(agentsDb._teams.some((t) => t.id === "t1"), false);
+  assert.equal(agentsDb._teamMembers.some((m) => m.team_id === "t1"), false);
+  assert.equal(agentsDb._teamAccess.some((a) => a.team_id === "t1"), false);
+  assert.equal(agentsDb._agents.some((a) => a.id === "a1"), true, "deleting a team must not delete its member agents");
+
+  assert.equal((await get("/v1/teams/t1", headers)).status, 404);
+});
+
+test("GET /v1/teams lists only the teams the caller has team_access to", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, { id: "a1", owners: ["user-1"] });
+  seedTeam(agentsDb, { id: "t1", members: [{ agentId: "a1" }], owners: ["user-1"] });
+  seedTeam(agentsDb, { id: "t2", members: [{ agentId: "a1" }], owners: ["user-2"] });
+  const { get } = harness({ AGENTS_DB: agentsDb });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:teams"] });
+
+  const { status, body } = await get("/v1/teams", headers);
+
+  assert.equal(status, 200);
+  assert.equal(body.data.length, 1);
+  assert.equal(body.data[0].id, "t1");
+  // The list view omits the members array (see team-db.mjs's mapTeamRow) --
+  // only GET /v1/teams/:id includes it.
+  assert.equal(body.data[0].members, undefined);
+});
+
+test("PUT /v1/teams/:id/access/:userId rejects an invalid role with 400 and downgrading the sole owner with 409", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, { id: "a1", owners: ["user-1"] });
+  seedTeam(agentsDb, { id: "t1", members: [{ agentId: "a1" }], owners: ["user-1"] });
+  const { put } = harness({ AGENTS_DB: agentsDb });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:teams"] });
+
+  const invalidRole = await put("/v1/teams/t1/access/user-2", { role: "admin" }, headers);
+  assert.equal(invalidRole.status, 400);
+
+  const downgrade = await put("/v1/teams/t1/access/user-1", { role: "editor" }, headers);
+  assert.equal(downgrade.status, 409);
+  assert.match(downgrade.body.error.message, /at least one owner/);
+});
+
+test("GET /v1/teams/:id/access lists every collaborator and DELETE self-removal works even as a viewer", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, { id: "a1", owners: ["user-1"] });
+  seedTeam(agentsDb, { id: "t1", members: [{ agentId: "a1" }], owners: ["user-1"], viewers: ["user-2"] });
+  const { get, del } = harness({ AGENTS_DB: agentsDb });
+  const viewerHeaders = await authHeader({ sub: "user-2", permissions: ["ai:teams"] });
+
+  const list = await get("/v1/teams/t1/access", viewerHeaders);
+  assert.equal(list.status, 200);
+  assert.equal(list.body.count, 2);
+
+  const { status } = await del("/v1/teams/t1/access/user-2", viewerHeaders);
+  assert.equal(status, 200);
+  assert.equal(agentsDb._teamAccess.some((a) => a.user_id === "user-2"), false);
+});
+
+// --- Sessions referencing a team (docs/specs/agent-teams.md) ---
+
+test("POST /v1/sessions with agent_id and team_id together returns 400", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, { id: "a1", owners: ["user-1"] });
+  seedTeam(agentsDb, { id: "t1", members: [{ agentId: "a1" }], owners: ["user-1"] });
+  const { post } = harness({ AGENTS_DB: agentsDb });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:chat"] });
+
+  const { status, body } = await post("/v1/sessions", { agent_id: "a1", team_id: "t1" }, headers);
+
+  assert.equal(status, 400);
+  assert.match(body.error.message, /mutually exclusive/);
+});
+
+test("POST /v1/sessions with a team_id the user has no access to returns 404 (not 403)", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, { id: "a1", owners: ["user-2"] });
+  seedTeam(agentsDb, { id: "t1", members: [{ agentId: "a1" }], owners: ["user-2"] });
+  const { post } = harness({ AGENTS_DB: agentsDb });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:chat"] });
+
+  const { status } = await post("/v1/sessions", { team_id: "t1" }, headers);
+
+  assert.equal(status, 404);
+});
+
+test("POST /v1/sessions with a team_id stores a live reference, not a snapshot", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, { id: "a1", owners: ["user-1"] });
+  seedTeam(agentsDb, { id: "t1", members: [{ agentId: "a1" }], owners: ["user-1"] });
+  const { post, chatDb } = harness({ AGENTS_DB: agentsDb });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:chat"] });
+
+  const { status, body } = await post("/v1/sessions", { team_id: "t1" }, headers);
+
+  assert.equal(status, 201);
+  assert.equal(body.team_id, "t1");
+  assert.equal(body.agent_id, null);
+
+  const session = chatDb._sessions.find((s) => s.id === body.id);
+  assert.equal(session.agent_system_prompt, null);
+  assert.equal(session.agent_model, null);
+  assert.equal(session.agent_tools, null);
+});
+
+test("a session with a team_id is a live reference: editing the team changes the very next message's behavior", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, { id: "a1", owners: ["user-1"], name: "AgentOne" });
+  seedAgent(agentsDb, { id: "a2", owners: ["user-1"], name: "AgentTwo" });
+  seedTeam(agentsDb, { id: "t1", orchestrationMode: "pipeline", members: [{ agentId: "a1" }], owners: ["user-1"] });
+
+  const runCalls = [];
+  const ai = createToolCallingAI({
+    turns: [{ response: "only agent one" }, { response: "agent one, round 2" }, { response: "agent two speaks" }],
+    runCalls,
+  });
+  const chatDb = createChatDB();
+  const { post, patch } = harness({ AGENTS_DB: agentsDb, CHAT_DB: chatDb, AI: ai });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:chat", "ai:teams"] });
+
+  const created = await post("/v1/sessions", { team_id: "t1" }, headers);
+  const sessionId = created.body.id;
+
+  const first = await post(`/v1/sessions/${sessionId}/messages`, { content: "hi" }, headers);
+  assert.equal(first.body.message.content, "only agent one");
+  assert.equal(runCalls.length, 1);
+
+  const patchRes = await patch("/v1/teams/t1", { members: [{ agent_id: "a1" }, { agent_id: "a2" }] }, headers);
+  assert.equal(patchRes.status, 200);
+
+  const second = await post(`/v1/sessions/${sessionId}/messages`, { content: "hi again" }, headers);
+  assert.equal(second.body.message.content, "agent two speaks");
+  assert.equal(runCalls.length, 3);
+});
+
+// --- Team orchestration (docs/specs/agent-teams.md) ---
+
+test("team pipeline mode: each member sees only the previous member's output, the last member's output is the final answer", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, { id: "a1", owners: ["user-1"], name: "Writer", systemPrompt: "You write drafts." });
+  seedAgent(agentsDb, { id: "a2", owners: ["user-1"], name: "Editor", systemPrompt: "You polish drafts." });
+  seedTeam(agentsDb, {
+    id: "t1",
+    name: "Pipeline Team",
+    orchestrationMode: "pipeline",
+    members: [{ agentId: "a1" }, { agentId: "a2" }],
+    owners: ["user-1"],
+  });
+
+  const runCalls = [];
+  const ai = createToolCallingAI({ turns: [{ response: "draft from writer" }, { response: "polished by editor" }], runCalls });
+
+  const chatDb = createChatDB();
+  const { post, get } = harness({ AGENTS_DB: agentsDb, CHAT_DB: chatDb, AI: ai });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:chat"] });
+
+  const created = await post("/v1/sessions", { team_id: "t1" }, headers);
+  assert.equal(created.status, 201);
+  assert.equal(created.body.team_id, "t1");
+
+  const sent = await post(`/v1/sessions/${created.body.id}/messages`, { content: "write something" }, headers);
+  assert.equal(sent.status, 200);
+  assert.equal(sent.body.message.content, "polished by editor");
+
+  assert.equal(runCalls.length, 2);
+  const firstUserMsg = runCalls[0].input.messages.find((m) => m.role === "user");
+  assert.match(firstUserMsg.content, /write something/);
+  const secondUserMsg = runCalls[1].input.messages.find((m) => m.role === "user");
+  assert.match(secondUserMsg.content, /draft from writer/);
+
+  const messages = (await get(`/v1/sessions/${created.body.id}/messages`, headers)).body.data;
+  const assistantMessages = messages.filter((m) => m.role === "assistant");
+  assert.equal(assistantMessages.length, 2);
+  assert.equal(assistantMessages[0].agent_id, "a1");
+  assert.equal(assistantMessages[0].content, "draft from writer");
+  assert.equal(assistantMessages[1].agent_id, "a2");
+  assert.equal(assistantMessages[1].content, "polished by editor");
+});
+
+test("team debate mode with fixed_rounds: runs exactly `rounds` rounds, then the lead agent synthesizes the final answer", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, { id: "a1", owners: ["user-1"], name: "Pro" });
+  seedAgent(agentsDb, { id: "a2", owners: ["user-1"], name: "Con" });
+  seedTeam(agentsDb, {
+    id: "t1",
+    orchestrationMode: "debate",
+    leadAgentId: "a1",
+    rounds: 2,
+    terminationStrategy: "fixed_rounds",
+    members: [{ agentId: "a1" }, { agentId: "a2" }],
+    owners: ["user-1"],
+  });
+
+  const runCalls = [];
+  const ai = createToolCallingAI({
+    turns: [
+      { response: "Pro round 1" },
+      { response: "Con round 1" },
+      { response: "Pro round 2" },
+      { response: "Con round 2" },
+      { response: "Final synthesis" },
+    ],
+    runCalls,
+  });
+
+  const chatDb = createChatDB();
+  const { post, get } = harness({ AGENTS_DB: agentsDb, CHAT_DB: chatDb, AI: ai });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:chat"] });
+
+  const created = await post("/v1/sessions", { team_id: "t1" }, headers);
+  const sent = await post(`/v1/sessions/${created.body.id}/messages`, { content: "Should we do X?" }, headers);
+
+  assert.equal(sent.status, 200);
+  assert.equal(sent.body.message.content, "Final synthesis");
+  assert.equal(runCalls.length, 5);
+
+  const messages = (await get(`/v1/sessions/${created.body.id}/messages`, headers)).body.data;
+  const assistantMessages = messages.filter((m) => m.role === "assistant");
+  assert.equal(assistantMessages.length, 5);
+  assert.deepEqual(assistantMessages.map((m) => m.agent_id), ["a1", "a2", "a1", "a2", "a1"]);
+});
+
+test("team debate mode with moderator: the lead agent can stop the discussion before the rounds ceiling", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, { id: "a1", owners: ["user-1"], name: "Moderator" });
+  seedAgent(agentsDb, { id: "a2", owners: ["user-1"], name: "Debater" });
+  seedTeam(agentsDb, {
+    id: "t1",
+    orchestrationMode: "debate",
+    leadAgentId: "a1",
+    rounds: 3,
+    terminationStrategy: "moderator",
+    members: [{ agentId: "a1" }, { agentId: "a2" }],
+    owners: ["user-1"],
+  });
+
+  const runCalls = [];
+  const ai = createToolCallingAI({
+    turns: [{ response: "a1 opening statement" }, { response: "a2 opening statement" }, { response: "[FINAL] The answer is 42." }],
+    runCalls,
+  });
+
+  const chatDb = createChatDB();
+  const { post } = harness({ AGENTS_DB: agentsDb, CHAT_DB: chatDb, AI: ai });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:chat"] });
+
+  const created = await post("/v1/sessions", { team_id: "t1" }, headers);
+  const sent = await post(`/v1/sessions/${created.body.id}/messages`, { content: "hi" }, headers);
+
+  assert.equal(sent.status, 200);
+  assert.equal(sent.body.message.content, "The answer is 42.");
+  // Only 1 round (2 members) + 1 moderator check -- not the full 3-round ceiling.
+  assert.equal(runCalls.length, 3);
+});
+
+test("team debate mode with moderator: an adversarial moderator that never says [FINAL] still terminates at the rounds ceiling", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, { id: "a1", owners: ["user-1"], name: "Moderator" });
+  seedAgent(agentsDb, { id: "a2", owners: ["user-1"], name: "Debater" });
+  seedTeam(agentsDb, {
+    id: "t1",
+    orchestrationMode: "debate",
+    leadAgentId: "a1",
+    rounds: 2,
+    terminationStrategy: "moderator",
+    members: [{ agentId: "a1" }, { agentId: "a2" }],
+    owners: ["user-1"],
+  });
+
+  const runCalls = [];
+  const ai = createToolCallingAI({
+    turns: [
+      { response: "a1 round 1" },
+      { response: "a2 round 1" },
+      { response: "[CONTINUE] not done yet" },
+      { response: "a1 round 2" },
+      { response: "a2 round 2" },
+      { response: "Forced final answer" },
+    ],
+    runCalls,
+  });
+
+  const chatDb = createChatDB();
+  const { post } = harness({ AGENTS_DB: agentsDb, CHAT_DB: chatDb, AI: ai });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:chat"] });
+
+  const created = await post("/v1/sessions", { team_id: "t1" }, headers);
+  const sent = await post(`/v1/sessions/${created.body.id}/messages`, { content: "hi" }, headers);
+
+  assert.equal(sent.status, 200);
+  assert.equal(sent.body.message.content, "Forced final answer");
+  assert.equal(runCalls.length, 6);
+});
+
+test("team orchestrator mode: the coordinator selects a member via select_next_agent, then finishes", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, { id: "a1", owners: ["user-1"], name: "Coordinator", model: "@cf/meta/llama-3.1-8b-instruct" });
+  seedAgent(agentsDb, { id: "a2", owners: ["user-1"], name: "Researcher" });
+  seedTeam(agentsDb, {
+    id: "t1",
+    orchestrationMode: "orchestrator",
+    leadAgentId: "a1",
+    members: [{ agentId: "a1" }, { agentId: "a2" }],
+    owners: ["user-1"],
+  });
+
+  const runCalls = [];
+  const ai = createToolCallingAI({
+    turns: [
+      { tool_calls: [{ name: "select_next_agent", arguments: { action: "speak", next_agent: "Researcher" } }] },
+      { response: "Some research findings." },
+      { tool_calls: [{ name: "select_next_agent", arguments: { action: "finish", final_answer: "Final answer using research." } }] },
+    ],
+    runCalls,
+  });
+
+  const chatDb = createChatDB();
+  const { post, get } = harness({ AGENTS_DB: agentsDb, CHAT_DB: chatDb, AI: ai });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:chat"] });
+
+  const created = await post("/v1/sessions", { team_id: "t1" }, headers);
+  const sent = await post(`/v1/sessions/${created.body.id}/messages`, { content: "Research X for me" }, headers);
+
+  assert.equal(sent.status, 200);
+  assert.equal(sent.body.message.content, "Final answer using research.");
+  assert.equal(runCalls.length, 3);
+  assert.ok(runCalls[0].input.tools?.some((t) => t.function.name === "select_next_agent"));
+
+  const messages = (await get(`/v1/sessions/${created.body.id}/messages`, headers)).body.data;
+  const assistantMessages = messages.filter((m) => m.role === "assistant");
+  assert.equal(assistantMessages.length, 3);
+  assert.equal(assistantMessages[1].agent_id, "a2");
+  assert.equal(assistantMessages[1].content, "Some research findings.");
+});
+
+test("team orchestrator mode: reaching max_orchestrator_steps forces a finish-only call", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, { id: "a1", owners: ["user-1"], name: "Coordinator", model: "@cf/meta/llama-3.1-8b-instruct" });
+  seedAgent(agentsDb, { id: "a2", owners: ["user-1"], name: "Researcher" });
+  seedTeam(agentsDb, {
+    id: "t1",
+    orchestrationMode: "orchestrator",
+    leadAgentId: "a1",
+    maxOrchestratorSteps: 2,
+    members: [{ agentId: "a1" }, { agentId: "a2" }],
+    owners: ["user-1"],
+  });
+
+  const runCalls = [];
+  const ai = createToolCallingAI({
+    turns: [
+      { tool_calls: [{ name: "select_next_agent", arguments: { action: "speak", next_agent: "Researcher" } }] },
+      { response: "a2 says round1" },
+      { tool_calls: [{ name: "select_next_agent", arguments: { action: "finish", final_answer: "Forced final." } }] },
+    ],
+    runCalls,
+  });
+
+  const chatDb = createChatDB();
+  const { post } = harness({ AGENTS_DB: agentsDb, CHAT_DB: chatDb, AI: ai });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:chat"] });
+
+  const created = await post("/v1/sessions", { team_id: "t1" }, headers);
+  const sent = await post(`/v1/sessions/${created.body.id}/messages`, { content: "go" }, headers);
+
+  assert.equal(sent.status, 200);
+  assert.equal(sent.body.message.content, "Forced final.");
+  assert.equal(runCalls.length, 3);
+  // The forced (2nd) coordinator call only offers the finish action.
+  const forcedCallTool = runCalls[2].input.tools[0];
+  assert.deepEqual(forcedCallTool.function.parameters.properties.action.enum, ["finish"]);
+});
+
+test("a team member with tools configured runs its own tool-calling loop inside its turn, tagged with its agent_id", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, {
+    id: "a1",
+    owners: ["user-1"],
+    name: "Researcher",
+    model: "@cf/meta/llama-3.1-8b-instruct",
+    tools: ["query_knowledge_base"],
+    maxToolIterations: 5,
+  });
+  seedAgent(agentsDb, { id: "a2", owners: ["user-1"], name: "Writer" });
+  seedTeam(agentsDb, {
+    id: "t1",
+    orchestrationMode: "pipeline",
+    members: [{ agentId: "a1" }, { agentId: "a2" }],
+    owners: ["user-1"],
+  });
+
+  const runCalls = [];
+  const ai = createToolCallingAI({
+    turns: [
+      { tool_calls: [{ name: "query_knowledge_base", arguments: { question: "what is x?" } }] },
+      { response: "x is 42" },
+      { response: "Report: x is 42." },
+    ],
+    runCalls,
+  });
+
+  const ragWorker = {
+    async query(question) {
+      return { question, answer: "x is 42", sources: [] };
+    },
+  };
+
+  const chatDb = createChatDB();
+  const { post, get } = harness({ AGENTS_DB: agentsDb, CHAT_DB: chatDb, AI: ai, RAG_WORKER: ragWorker });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:chat"] });
+
+  const created = await post("/v1/sessions", { team_id: "t1" }, headers);
+  const sent = await post(`/v1/sessions/${created.body.id}/messages`, { content: "what is x?" }, headers);
+
+  assert.equal(sent.status, 200);
+  assert.equal(sent.body.message.content, "Report: x is 42.");
+  assert.equal(runCalls.length, 3, "a1's own tool-calling loop ceiling is independent of the team's pipeline");
+
+  const messages = (await get(`/v1/sessions/${created.body.id}/messages`, headers)).body.data;
+  const toolMessage = messages.find((m) => m.role === "tool");
+  assert.ok(toolMessage);
+  assert.equal(toolMessage.agent_id, "a1");
+
+  const assistantMessages = messages.filter((m) => m.role === "assistant");
+  assert.equal(assistantMessages.length, 3);
+  assert.equal(assistantMessages[0].agent_id, "a1"); // a1's tool_calls request
+  assert.equal(assistantMessages[0].content, JSON.stringify({ tool_calls: [{ name: "query_knowledge_base", arguments: { question: "what is x?" } }] }));
+  assert.equal(assistantMessages[1].agent_id, "a1"); // a1's own final turn content
+  assert.equal(assistantMessages[1].content, "x is 42");
+  assert.equal(assistantMessages[2].agent_id, "a2"); // a2's turn
+  assert.equal(assistantMessages[2].content, "Report: x is 42.");
+});
+
+test("team orchestration failures (a real model error) abort the whole request with an error response", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, { id: "a1", owners: ["user-1"] });
+  seedAgent(agentsDb, { id: "a2", owners: ["user-1"] });
+  seedTeam(agentsDb, {
+    id: "t1",
+    orchestrationMode: "pipeline",
+    members: [{ agentId: "a1" }, { agentId: "a2" }],
+    owners: ["user-1"],
+  });
+
+  const ai = {
+    async run() {
+      throw new Error("simulated model failure");
+    },
+  };
+
+  const chatDb = createChatDB();
+  const { post } = harness({ AGENTS_DB: agentsDb, CHAT_DB: chatDb, AI: ai });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:chat"] });
+
+  const created = await post("/v1/sessions", { team_id: "t1" }, headers);
+  const sent = await post(`/v1/sessions/${created.body.id}/messages`, { content: "hi" }, headers);
+
+  assert.equal(sent.status, 500);
+  assert.match(sent.body.error.message, /simulated model failure/);
+});
+
+test("team send-message with stream: true replays the final answer via SSE", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, { id: "a1", owners: ["user-1"], name: "Writer" });
+  seedTeam(agentsDb, { id: "t1", orchestrationMode: "pipeline", members: [{ agentId: "a1" }], owners: ["user-1"] });
+
+  const ai = createStreamingAI({ chunks: ["stream", "ed answer"] });
+  const chatDb = createChatDB();
+  const { worker, post, get } = harness({ AGENTS_DB: agentsDb, CHAT_DB: chatDb, AI: ai });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:chat"] });
+
+  const created = await post("/v1/sessions", { team_id: "t1" }, headers);
+  const sessionId = created.body.id;
+
+  const response = await worker.fetch(
+    new Request(`https://ai.test/v1/sessions/${sessionId}/messages`, {
+      method: "POST",
+      body: JSON.stringify({ content: "hi", stream: true }),
+      headers: { "content-type": "application/json", ...headers },
+    })
+  );
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type"), /text\/event-stream/);
+
+  const events = await readSSEEvents(response);
+  assert.equal(events[events.length - 1], "[DONE]");
+
+  const messages = (await get(`/v1/sessions/${sessionId}/messages`, headers)).body.data;
+  const assistantMessages = messages.filter((m) => m.role === "assistant");
+  // a1's own (tagged) turn from the non-streaming orchestration pass, plus
+  // the freshly-regenerated (untagged) streamed final answer -- see
+  // handleTeamSendMessage's comment on this accepted double-persist trade-off.
+  assert.equal(assistantMessages.length, 2);
+  assert.equal(assistantMessages[assistantMessages.length - 1].content, "streamed answer");
+  assert.equal(assistantMessages[assistantMessages.length - 1].agent_id, null);
 });
