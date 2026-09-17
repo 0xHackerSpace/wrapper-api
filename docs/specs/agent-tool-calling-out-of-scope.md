@@ -2,13 +2,9 @@
 
 Complementa [agent-tool-calling.md](agent-tool-calling.md). Lista o que foi deliberadamente adiado, e por quê.
 
-## Tool `find_node` / escrita no grafo (`graph-worker`)
+## Tool `find_node` (leitura do grafo)
 
-Nenhum método RPC do `graph-worker` (`findNodeByLabel`, `upsertNode`, `createEdge`, etc.) vira tool nesta spec — só `query_knowledge_base` (RAG).
-
-**Por quê**: grafos são multi-tenant com ACL por grafo (`graph_access`). Todo método RPC do `graph-worker` exige um `graphId` específico e um `actorSub` com papel na `graph_access` daquele grafo — não existe hoje um modelo de "qual grafo pertence a qual agent" nem de "de quem é o `actorSub` usado para checar acesso durante uma tool call" (o usuário da sessão? um service account fixo? o dono do agent?). Resolver isso é uma decisão de design própria, não uma extensão mecânica do mecanismo de tools desta spec.
-
-**Quando revisitar**: quando houver um caso de uso concreto de agent que precise consultar/editar um grafo específico, decidindo nesse momento o vínculo agent↔graph e o modelo de autorização.
+**Em implementação** — ver [agent-graph-tool.md](agent-graph-tool.md). Resolve "qual grafo" (campo `graph_id` fixo no agent) e "de quem é o `actorSub`" (o usuário da sessão) para a tool `find_node` (`graph-worker.findNodeByLabel`). Escrita no grafo (`upsertNode`, `createEdge`, etc.), busca difusa e outras RPCs de leitura (`getNeighbors`, `findPaths`) continuam fora de escopo, registradas na própria spec.
 
 ## Streaming dos ciclos intermediários de tool calling
 
