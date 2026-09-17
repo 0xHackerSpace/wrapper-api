@@ -21,7 +21,8 @@ d1_databases = {
       "migrations/0011_seed_ai_permissions.sql",
       "migrations/0012_seed_auth_stats_permission.sql",
       "migrations/0013_add_graphrag_permission.sql",
-      "migrations/0017_seed_agent_permissions.sql"
+      "migrations/0017_seed_agent_permissions.sql",
+      "migrations/0024_seed_team_permissions.sql"
     ]
   }
   ingredient = {
@@ -53,7 +54,8 @@ d1_databases = {
       "migrations/0015_add_chat_access.sql",
       "migrations/0018_add_agent_snapshot_to_chat_sessions.sql",
       "migrations/0020_add_agent_tools_snapshot_to_chat_sessions.sql",
-      "migrations/0022_add_agent_graph_id_snapshot_to_chat_sessions.sql"
+      "migrations/0022_add_agent_graph_id_snapshot_to_chat_sessions.sql",
+      "migrations/0025_add_team_support_to_chat.sql"
     ]
   }
   agents = {
@@ -63,7 +65,8 @@ d1_databases = {
     migrations = [
       "migrations/0016_create_agents.sql",
       "migrations/0019_add_tools_to_agents.sql",
-      "migrations/0021_add_graph_id_to_agents.sql"
+      "migrations/0021_add_graph_id_to_agents.sql",
+      "migrations/0023_create_agent_teams.sql"
     ]
   }
 }
