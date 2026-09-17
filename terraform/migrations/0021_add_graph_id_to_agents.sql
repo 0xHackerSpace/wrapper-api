@@ -1,0 +1,21 @@
+-- Migration: 0021_add_graph_id_to_agents
+-- Description: Adds a nullable "graph_id" column to agents (D1 dev-agents)
+-- -- see docs/specs/agent-graph-tool.md. The agent's owner picks, at
+-- registration/edit time, which graph (dev-graph) the agent's `find_node`
+-- tool connects to -- an agent only ever queries a single, fixed graph. Not
+-- a parameter the model chooses per call.
+--
+-- No validation at write time: this column accepts any string, without
+-- checking whether the graph exists or whether the caller has access to it.
+-- Access is checked at runtime instead (graph-worker's findNodeByLabel RPC
+-- calls requireRole(..., actorSub, "viewer")), using the sub of whoever is
+-- actually chatting with the agent -- which may differ from whoever
+-- registered/edited it (agents can be shared, see agent_access).
+--
+-- No FOREIGN KEY on graph_id: dev-agents is a separate D1 database from
+-- dev-graph, and D1/SQLite does not support cross-database foreign keys --
+-- same reasoning already used for the agent_* columns on chat_sessions
+-- (migrations 0018/0020).
+-- Created: 2026-09-17
+
+ALTER TABLE agents ADD COLUMN graph_id TEXT;
