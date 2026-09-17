@@ -7,11 +7,18 @@
 // graph-db.mjs: one ACL pattern, reused per domain rather than reinvented.
 import { AuthError, ConflictError } from "./auth.mjs";
 import { ValidationError } from "./ai.mjs";
+import { isKnownTool } from "./tools.mjs";
 
 export { ValidationError, ConflictError };
 
 export const ROLE_RANK = { viewer: 1, editor: 2, owner: 3 };
 const VALID_ROLES = ["owner", "editor", "viewer"];
+
+// docs/specs/agent-tool-calling.md: ceiling on model->tool->model cycles
+// before a message-processing loop forces a final, tool-less answer. Applied
+// in application code (not relied on as a D1 column DEFAULT) because binding
+// an explicit NULL would violate the column's NOT NULL constraint.
+const DEFAULT_MAX_TOOL_ITERATIONS = 5;
 
 const DEFAULT_PAGE_SIZE = 20;
 const MAX_PAGE_SIZE = 100;
@@ -26,6 +33,8 @@ function mapAgentRow(row) {
     temperature: row.temperature ?? null,
     max_tokens: row.max_tokens ?? null,
     top_p: row.top_p ?? null,
+    tools: row.tools ? JSON.parse(row.tools) : null,
+    max_tool_iterations: row.max_tool_iterations ?? null,
     created_at: row.created_at,
     updated_at: row.updated_at,
     ...(row.role !== undefined ? { role: row.role } : {}),
@@ -66,7 +75,33 @@ function validateOptionalNumber(value, field) {
   return value;
 }
 
-function validateAgentFields({ name, system_prompt, model, temperature, max_tokens, top_p }) {
+// Array of tool names (docs/specs/agent-tool-calling.md): each one must exist
+// in the fixed TOOL_CATALOG (lib/tools.mjs) or the whole request is rejected
+// with 400 -- same "reject unknown values outright" approach as roles in
+// upsertAgentAccess(). An absent/null value means "no tools" and is left as
+// null (not []) so it round-trips through the nullable `tools` D1 column.
+function validateOptionalTools(tools) {
+  if (tools === undefined || tools === null) return null;
+  if (!Array.isArray(tools)) {
+    throw new ValidationError("tools must be an array of tool names");
+  }
+  for (const name of tools) {
+    if (typeof name !== "string" || !isKnownTool(name)) {
+      throw new ValidationError(`Unknown tool: ${name}`);
+    }
+  }
+  return tools;
+}
+
+function validateOptionalMaxToolIterations(value) {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+    throw new ValidationError("max_tool_iterations must be a positive integer");
+  }
+  return value;
+}
+
+function validateAgentFields({ name, system_prompt, model, temperature, max_tokens, top_p, tools, max_tool_iterations }) {
   if (typeof name !== "string" || !name.trim()) {
     throw new ValidationError("name is required and must be a non-empty string");
   }
@@ -84,23 +119,37 @@ function validateAgentFields({ name, system_prompt, model, temperature, max_toke
     temperature: validateOptionalNumber(temperature, "temperature"),
     max_tokens: validateOptionalNumber(max_tokens, "max_tokens"),
     top_p: validateOptionalNumber(top_p, "top_p"),
+    tools: validateOptionalTools(tools),
+    max_tool_iterations: validateOptionalMaxToolIterations(max_tool_iterations),
   };
 }
 
-export async function createAgent(db, { userId, name, system_prompt, model, temperature, max_tokens, top_p }) {
+export async function createAgent(db, { userId, name, system_prompt, model, temperature, max_tokens, top_p, tools, max_tool_iterations }) {
   if (!db) {
     throw new Error("Database not configured");
   }
 
-  const fields = validateAgentFields({ name, system_prompt, model, temperature, max_tokens, top_p });
+  const fields = validateAgentFields({ name, system_prompt, model, temperature, max_tokens, top_p, tools, max_tool_iterations });
   const id = crypto.randomUUID();
+  const toolsJson = fields.tools ? JSON.stringify(fields.tools) : null;
+  const maxToolIterations = fields.max_tool_iterations ?? DEFAULT_MAX_TOOL_ITERATIONS;
 
   await db
     .prepare(
-      `INSERT INTO agents (id, name, system_prompt, model, temperature, max_tokens, top_p)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO agents (id, name, system_prompt, model, temperature, max_tokens, top_p, tools, max_tool_iterations)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
-    .bind(id, fields.name, fields.system_prompt, fields.model, fields.temperature, fields.max_tokens, fields.top_p)
+    .bind(
+      id,
+      fields.name,
+      fields.system_prompt,
+      fields.model,
+      fields.temperature,
+      fields.max_tokens,
+      fields.top_p,
+      toolsJson,
+      maxToolIterations
+    )
     .run();
 
   // The creator becomes the sole owner in agent_access -- same pattern as
@@ -121,7 +170,7 @@ export async function getAgentById(db, id) {
 
   const row = await db
     .prepare(
-      "SELECT id, name, system_prompt, model, temperature, max_tokens, top_p, created_at, updated_at FROM agents WHERE id = ?"
+      "SELECT id, name, system_prompt, model, temperature, max_tokens, top_p, tools, max_tool_iterations, created_at, updated_at FROM agents WHERE id = ?"
     )
     .bind(id)
     .first();
@@ -146,7 +195,7 @@ export async function listAgentsForUser(db, userId, { limit, cursor } = {}) {
 
   const results = await db
     .prepare(
-      `SELECT a.id, a.name, a.system_prompt, a.model, a.temperature, a.max_tokens, a.top_p, a.created_at, a.updated_at, aa.role
+      `SELECT a.id, a.name, a.system_prompt, a.model, a.temperature, a.max_tokens, a.top_p, a.tools, a.max_tool_iterations, a.created_at, a.updated_at, aa.role
        FROM agents a
        JOIN agent_access aa ON aa.agent_id = a.id
        WHERE aa.user_id = ? ${cursorClause}
@@ -189,14 +238,28 @@ export async function updateAgent(db, id, updates) {
     temperature: updates.temperature !== undefined ? updates.temperature : existing.temperature,
     max_tokens: updates.max_tokens !== undefined ? updates.max_tokens : existing.max_tokens,
     top_p: updates.top_p !== undefined ? updates.top_p : existing.top_p,
+    tools: updates.tools !== undefined ? updates.tools : existing.tools,
+    max_tool_iterations: updates.max_tool_iterations !== undefined ? updates.max_tool_iterations : existing.max_tool_iterations,
   });
+  const toolsJson = merged.tools ? JSON.stringify(merged.tools) : null;
+  const maxToolIterations = merged.max_tool_iterations ?? DEFAULT_MAX_TOOL_ITERATIONS;
 
   await db
     .prepare(
-      `UPDATE agents SET name = ?, system_prompt = ?, model = ?, temperature = ?, max_tokens = ?, top_p = ?, updated_at = CURRENT_TIMESTAMP
+      `UPDATE agents SET name = ?, system_prompt = ?, model = ?, temperature = ?, max_tokens = ?, top_p = ?, tools = ?, max_tool_iterations = ?, updated_at = CURRENT_TIMESTAMP
        WHERE id = ?`
     )
-    .bind(merged.name, merged.system_prompt, merged.model, merged.temperature, merged.max_tokens, merged.top_p, id)
+    .bind(
+      merged.name,
+      merged.system_prompt,
+      merged.model,
+      merged.temperature,
+      merged.max_tokens,
+      merged.top_p,
+      toolsJson,
+      maxToolIterations,
+      id
+    )
     .run();
 
   return getAgentById(db, id);
