@@ -4,11 +4,7 @@ Complementa [agent-registration.md](agent-registration.md). Lista o que foi deli
 
 ## Tool calling / function calling
 
-Agent é, nesta spec, só `system_prompt` + parâmetros de geração (`model`, `temperature`, `max_tokens`, `top_p`). Não há campo para declarar acesso a ferramentas/RPCs de outros workers (ex.: `graph-worker`, `rag-worker`) que o `ai-worker` orquestraria durante a conversa.
-
-**Por quê**: tool calling é uma feature grande por si só — parsing de function calls do modelo, orquestração de chamadas RPC, tratamento de erro por ferramenta, formato de resposta intermediária. Os modelos disponíveis via Cloudflare Workers AI não têm suporte confirmado e maduro a function calling estilo OpenAI hoje.
-
-**Quando revisitar**: se surgir um caso concreto de agent que precise consultar `graph-worker`/`rag-worker` durante a conversa (não só no fluxo já existente do `graphrag-worker`), vira spec própria.
+**Em implementação** — ver [agent-tool-calling.md](agent-tool-calling.md) e [agent-tool-calling-out-of-scope.md](agent-tool-calling-out-of-scope.md). Agent ganha um campo `tools` opcional (catálogo fixo de tools do `ai-worker`, começando só por `query_knowledge_base` via `rag-worker`) e `max_tool_iterations`; escrita no grafo, tools customizadas e streaming dos ciclos intermediários continuam fora de escopo.
 
 ## Versionamento/histórico de edições do agent
 
