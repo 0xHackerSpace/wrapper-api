@@ -288,6 +288,7 @@ async function handleCreateSession(request, env) {
       topP: agent.top_p,
       tools: agent.tools,
       maxToolIterations: agent.max_tool_iterations,
+      graphId: agent.graph_id,
     };
   }
 
@@ -424,6 +425,8 @@ async function handleSendMessage(request, env, sessionId) {
       maxIterations: agentConfig.maxToolIterations ?? DEFAULT_MAX_TOOL_ITERATIONS,
       userContent: content,
       stream: stream === true,
+      actorSub: payload.sub,
+      graphId: agentConfig.graphId,
     });
   }
 
@@ -500,11 +503,13 @@ async function streamSendMessageResponse(env, sessionId, modelMessages, { aiOpti
 // extra model call as the documented trade-off, rather than trying to stream
 // the intermediate tool-calling rounds themselves (out of scope, see
 // agent-tool-calling-out-of-scope.md).
-async function handleToolCallingSendMessage(env, sessionId, modelMessages, { aiOptions, toolNames, maxIterations, userContent, stream }) {
+async function handleToolCallingSendMessage(env, sessionId, modelMessages, { aiOptions, toolNames, maxIterations, userContent, stream, actorSub, graphId }) {
   const { result, messagesForFinalCall } = await runToolCallingLoop(env, sessionId, modelMessages, {
     ...aiOptions,
     toolNames,
     maxIterations,
+    actorSub,
+    graphId,
   });
 
   if (stream) {
@@ -536,8 +541,15 @@ async function handleToolCallingSendMessage(env, sessionId, modelMessages, { aiO
 // full exchange survives in chat_messages, same as the eventual final reply.
 // Returns the exact message array that produced the final result too, so a
 // streaming caller can replay the identical prompt with stream: true.
-async function runToolCallingLoop(env, sessionId, initialMessages, { model, temperature, max_tokens, top_p, toolNames, maxIterations }) {
+//
+// docs/specs/agent-graph-tool.md: `actorSub`/`graphId` (the session's real
+// user and the agent's snapshotted graph_id) are resolved once here, into a
+// single `context` object passed to every tool.execute() call in this loop --
+// not per tool call, and never from the model's own arguments. Tools that
+// don't need it (query_knowledge_base) simply ignore it.
+async function runToolCallingLoop(env, sessionId, initialMessages, { model, temperature, max_tokens, top_p, toolNames, maxIterations, actorSub, graphId }) {
   const toolDefinitions = getToolDefinitions(toolNames);
+  const context = { actorSub, graphId };
   let messages = [...initialMessages];
   let cycle = 0;
 
@@ -574,7 +586,7 @@ async function runToolCallingLoop(env, sessionId, initialMessages, { model, temp
       let toolResultContent;
       try {
         if (!tool) throw new Error(`Unknown tool: ${name}`);
-        toolResultContent = JSON.stringify(await tool.execute(env, args));
+        toolResultContent = JSON.stringify(await tool.execute(env, args, context));
       } catch (error) {
         toolResultContent = JSON.stringify({ error: error.message });
       }

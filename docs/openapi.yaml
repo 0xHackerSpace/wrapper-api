@@ -208,6 +208,8 @@ components:
         chat, que copia estes campos como um snapshot congelado. `tools` e
         `max_tool_iterations` (ADR 0023) habilitam tool calling nas mensagens de
         sessoes que referenciam este agent -- ver `POST /v1/sessions/{id}/messages`.
+        `graph_id` (ADR 0024) e o grafo de conhecimento fixo usado pela tool
+        `find_node`, quando habilitada.
       properties:
         id:
           type: string
@@ -241,6 +243,16 @@ components:
           type: integer
           nullable: true
           description: Teto de ciclos modelo->tool->modelo antes de forcar uma resposta final. Default 5.
+        graph_id:
+          type: string
+          nullable: true
+          description: |
+            Grafo de conhecimento (dev-graph) que a tool `find_node` deste agent
+            consulta (ADR 0024). `null` ou ausente significa nenhum grafo
+            configurado. Nao e validado no cadastro (existencia do grafo/acesso do
+            criador) -- so em runtime, via a checagem de `graph_access` do
+            graph-worker usando o usuario real da sessao.
+          example: "ingredients"
         created_at:
           type: string
         updated_at:
@@ -273,6 +285,10 @@ components:
         max_tool_iterations:
           type: integer
           description: Opcional. Default 5 quando omitido.
+        graph_id:
+          type: string
+          nullable: true
+          description: Opcional. Grafo usado pela tool `find_node` (ADR 0024); nao validado no cadastro.
       required: [name, system_prompt, model]
     AgentUpdateInput:
       type: object
@@ -298,6 +314,10 @@ components:
           description: Nomes devem existir no catalogo fixo de tools (ADR 0023); nome desconhecido retorna 400.
         max_tool_iterations:
           type: integer
+        graph_id:
+          type: string
+          nullable: true
+          description: Grafo usado pela tool `find_node` (ADR 0024); nao validado na edicao.
     AccessEntry:
       type: object
       description: Linha de ACL (chat_access, agent_access ou graph_access), papel owner/editor/viewer.
@@ -1691,7 +1711,9 @@ paths:
       description: |
         Requer JWT + permission `ai:agents`. O criador vira `owner` do agent.
         `tools`, quando enviado, e validado contra o catalogo fixo de tools do
-        ai-worker (ADR 0023) -- nome desconhecido retorna 400.
+        ai-worker (ADR 0023) -- nome desconhecido retorna 400. `graph_id`
+        (ADR 0024), quando enviado, nao e validado (nem existencia do grafo,
+        nem acesso do criador) -- so afeta a tool `find_node` em runtime.
       tags: [ai]
       security:
         - bearerAuth: []
@@ -1803,7 +1825,9 @@ paths:
       description: |
         Requer JWT + permission `ai:agents`. Papel minimo: `editor`. `tools`,
         quando enviado, e validado contra o catalogo fixo de tools do ai-worker
-        (ADR 0023) -- nome desconhecido retorna 400.
+        (ADR 0023) -- nome desconhecido retorna 400. `graph_id` (ADR 0024),
+        quando enviado, nao e validado (nem existencia do grafo, nem acesso de
+        quem esta editando) -- so afeta a tool `find_node` em runtime.
       tags: [ai]
       security:
         - bearerAuth: []

@@ -90,11 +90,15 @@ export async function createSession(db, { userId, agentSnapshot = null }) {
   const agentTools =
     agentSnapshot?.tools && agentSnapshot.tools.length > 0 ? JSON.stringify(agentSnapshot.tools) : null;
   const agentMaxToolIterations = agentSnapshot?.maxToolIterations ?? null;
+  // docs/specs/agent-graph-tool.md: snapshotted alongside the rest of the
+  // agent config, same "copy once at session creation, never re-read
+  // AGENTS_DB" reasoning as the other agent_* columns.
+  const agentGraphId = agentSnapshot?.graphId ?? null;
 
   await db
     .prepare(
-      `INSERT INTO chat_sessions (id, user_id, agent_id, agent_system_prompt, agent_model, agent_temperature, agent_max_tokens, agent_top_p, agent_tools, agent_max_tool_iterations)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO chat_sessions (id, user_id, agent_id, agent_system_prompt, agent_model, agent_temperature, agent_max_tokens, agent_top_p, agent_tools, agent_max_tool_iterations, agent_graph_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .bind(
       id,
@@ -106,7 +110,8 @@ export async function createSession(db, { userId, agentSnapshot = null }) {
       agentMaxTokens,
       agentTopP,
       agentTools,
-      agentMaxToolIterations
+      agentMaxToolIterations,
+      agentGraphId
     )
     .run();
 
@@ -150,7 +155,7 @@ export async function getSessionAgentConfig(db, id) {
 
   const row = await db
     .prepare(
-      "SELECT agent_system_prompt, agent_model, agent_temperature, agent_max_tokens, agent_top_p, agent_tools, agent_max_tool_iterations FROM chat_sessions WHERE id = ?"
+      "SELECT agent_system_prompt, agent_model, agent_temperature, agent_max_tokens, agent_top_p, agent_tools, agent_max_tool_iterations, agent_graph_id FROM chat_sessions WHERE id = ?"
     )
     .bind(id)
     .first();
@@ -165,6 +170,7 @@ export async function getSessionAgentConfig(db, id) {
     topP: row.agent_top_p ?? null,
     tools: row.agent_tools ? JSON.parse(row.agent_tools) : null,
     maxToolIterations: row.agent_max_tool_iterations ?? null,
+    graphId: row.agent_graph_id ?? null,
   };
 }
 

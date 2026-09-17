@@ -35,6 +35,7 @@ function mapAgentRow(row) {
     top_p: row.top_p ?? null,
     tools: row.tools ? JSON.parse(row.tools) : null,
     max_tool_iterations: row.max_tool_iterations ?? null,
+    graph_id: row.graph_id ?? null,
     created_at: row.created_at,
     updated_at: row.updated_at,
     ...(row.role !== undefined ? { role: row.role } : {}),
@@ -101,7 +102,21 @@ function validateOptionalMaxToolIterations(value) {
   return value;
 }
 
-function validateAgentFields({ name, system_prompt, model, temperature, max_tokens, top_p, tools, max_tool_iterations }) {
+// docs/specs/agent-graph-tool.md, "Sem validação no cadastro": only checked
+// for shape here (non-empty string) -- whether the graph exists or the actor
+// has access to it is never checked at agent create/update time, only at
+// find_node's own runtime (find_node's execute(), via graph-worker's
+// findNodeByLabel ACL check), since an agent can later be used by someone
+// other than whoever set graph_id.
+function validateOptionalGraphId(graph_id) {
+  if (graph_id === undefined || graph_id === null) return null;
+  if (typeof graph_id !== "string" || !graph_id.trim()) {
+    throw new ValidationError("graph_id must be a non-empty string");
+  }
+  return graph_id;
+}
+
+function validateAgentFields({ name, system_prompt, model, temperature, max_tokens, top_p, tools, max_tool_iterations, graph_id }) {
   if (typeof name !== "string" || !name.trim()) {
     throw new ValidationError("name is required and must be a non-empty string");
   }
@@ -121,23 +136,24 @@ function validateAgentFields({ name, system_prompt, model, temperature, max_toke
     top_p: validateOptionalNumber(top_p, "top_p"),
     tools: validateOptionalTools(tools),
     max_tool_iterations: validateOptionalMaxToolIterations(max_tool_iterations),
+    graph_id: validateOptionalGraphId(graph_id),
   };
 }
 
-export async function createAgent(db, { userId, name, system_prompt, model, temperature, max_tokens, top_p, tools, max_tool_iterations }) {
+export async function createAgent(db, { userId, name, system_prompt, model, temperature, max_tokens, top_p, tools, max_tool_iterations, graph_id }) {
   if (!db) {
     throw new Error("Database not configured");
   }
 
-  const fields = validateAgentFields({ name, system_prompt, model, temperature, max_tokens, top_p, tools, max_tool_iterations });
+  const fields = validateAgentFields({ name, system_prompt, model, temperature, max_tokens, top_p, tools, max_tool_iterations, graph_id });
   const id = crypto.randomUUID();
   const toolsJson = fields.tools ? JSON.stringify(fields.tools) : null;
   const maxToolIterations = fields.max_tool_iterations ?? DEFAULT_MAX_TOOL_ITERATIONS;
 
   await db
     .prepare(
-      `INSERT INTO agents (id, name, system_prompt, model, temperature, max_tokens, top_p, tools, max_tool_iterations)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO agents (id, name, system_prompt, model, temperature, max_tokens, top_p, tools, max_tool_iterations, graph_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .bind(
       id,
@@ -148,7 +164,8 @@ export async function createAgent(db, { userId, name, system_prompt, model, temp
       fields.max_tokens,
       fields.top_p,
       toolsJson,
-      maxToolIterations
+      maxToolIterations,
+      fields.graph_id
     )
     .run();
 
@@ -170,7 +187,7 @@ export async function getAgentById(db, id) {
 
   const row = await db
     .prepare(
-      "SELECT id, name, system_prompt, model, temperature, max_tokens, top_p, tools, max_tool_iterations, created_at, updated_at FROM agents WHERE id = ?"
+      "SELECT id, name, system_prompt, model, temperature, max_tokens, top_p, tools, max_tool_iterations, graph_id, created_at, updated_at FROM agents WHERE id = ?"
     )
     .bind(id)
     .first();
@@ -195,7 +212,7 @@ export async function listAgentsForUser(db, userId, { limit, cursor } = {}) {
 
   const results = await db
     .prepare(
-      `SELECT a.id, a.name, a.system_prompt, a.model, a.temperature, a.max_tokens, a.top_p, a.tools, a.max_tool_iterations, a.created_at, a.updated_at, aa.role
+      `SELECT a.id, a.name, a.system_prompt, a.model, a.temperature, a.max_tokens, a.top_p, a.tools, a.max_tool_iterations, a.graph_id, a.created_at, a.updated_at, aa.role
        FROM agents a
        JOIN agent_access aa ON aa.agent_id = a.id
        WHERE aa.user_id = ? ${cursorClause}
@@ -240,13 +257,14 @@ export async function updateAgent(db, id, updates) {
     top_p: updates.top_p !== undefined ? updates.top_p : existing.top_p,
     tools: updates.tools !== undefined ? updates.tools : existing.tools,
     max_tool_iterations: updates.max_tool_iterations !== undefined ? updates.max_tool_iterations : existing.max_tool_iterations,
+    graph_id: updates.graph_id !== undefined ? updates.graph_id : existing.graph_id,
   });
   const toolsJson = merged.tools ? JSON.stringify(merged.tools) : null;
   const maxToolIterations = merged.max_tool_iterations ?? DEFAULT_MAX_TOOL_ITERATIONS;
 
   await db
     .prepare(
-      `UPDATE agents SET name = ?, system_prompt = ?, model = ?, temperature = ?, max_tokens = ?, top_p = ?, tools = ?, max_tool_iterations = ?, updated_at = CURRENT_TIMESTAMP
+      `UPDATE agents SET name = ?, system_prompt = ?, model = ?, temperature = ?, max_tokens = ?, top_p = ?, tools = ?, max_tool_iterations = ?, graph_id = ?, updated_at = CURRENT_TIMESTAMP
        WHERE id = ?`
     )
     .bind(
@@ -258,6 +276,7 @@ export async function updateAgent(db, id, updates) {
       merged.top_p,
       toolsJson,
       maxToolIterations,
+      merged.graph_id,
       id
     )
     .run();
