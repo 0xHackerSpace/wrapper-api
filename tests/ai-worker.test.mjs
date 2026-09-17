@@ -135,6 +135,7 @@ function createChatDB(seedSessions = [], seedAccess = [], seedMessages = []) {
             agentTopP,
             agentTools,
             agentMaxToolIterations,
+            agentGraphId,
           ] = boundArgs;
           const now = nextTimestamp();
           sessions.push({
@@ -149,6 +150,7 @@ function createChatDB(seedSessions = [], seedAccess = [], seedMessages = []) {
             agent_top_p: agentTopP ?? null,
             agent_tools: agentTools ?? null,
             agent_max_tool_iterations: agentMaxToolIterations ?? null,
+            agent_graph_id: agentGraphId ?? null,
             created_at: now,
             updated_at: now,
           });
@@ -316,7 +318,7 @@ function createAgentsDB(seedAgents = [], seedAccess = []) {
       },
       async run() {
         if (sql.startsWith("INSERT INTO agents")) {
-          const [id, name, systemPrompt, model, temperature, maxTokens, topP, tools, maxToolIterations] = boundArgs;
+          const [id, name, systemPrompt, model, temperature, maxTokens, topP, tools, maxToolIterations, graphId] = boundArgs;
           const now = nextTimestamp();
           agents.push({
             id,
@@ -328,6 +330,7 @@ function createAgentsDB(seedAgents = [], seedAccess = []) {
             top_p: topP ?? null,
             tools: tools ?? null,
             max_tool_iterations: maxToolIterations ?? null,
+            graph_id: graphId ?? null,
             created_at: now,
             updated_at: now,
           });
@@ -351,7 +354,7 @@ function createAgentsDB(seedAgents = [], seedAccess = []) {
           return { success: true };
         }
         if (sql.startsWith("UPDATE agents")) {
-          const [name, systemPrompt, model, temperature, maxTokens, topP, tools, maxToolIterations, id] = boundArgs;
+          const [name, systemPrompt, model, temperature, maxTokens, topP, tools, maxToolIterations, graphId, id] = boundArgs;
           const row = agents.find((a) => a.id === id);
           if (row) {
             row.name = name;
@@ -362,6 +365,7 @@ function createAgentsDB(seedAgents = [], seedAccess = []) {
             row.top_p = topP ?? null;
             row.tools = tools ?? null;
             row.max_tool_iterations = maxToolIterations ?? null;
+            row.graph_id = graphId ?? null;
             row.updated_at = nextTimestamp();
           }
           return { success: true };
@@ -405,6 +409,7 @@ function seedAgent(
     topP = null,
     tools = null,
     maxToolIterations = null,
+    graphId = null,
     owners,
     editors = [],
     viewers = [],
@@ -422,6 +427,7 @@ function seedAgent(
     top_p: topP,
     tools: tools ? JSON.stringify(tools) : null,
     max_tool_iterations: maxToolIterations,
+    graph_id: graphId,
     created_at: createdAt,
     updated_at: createdAt,
   });
@@ -1971,4 +1977,312 @@ test("a session with an agent that has no tools (or tools: []) behaves exactly a
   assert.equal(sent.status, 200);
   assert.equal(sent.body.message.content, "mocked response");
   assert.equal(runCalls.length, 1, "no tool-calling loop should run for an agent without tools");
+});
+
+// --- find_node / graph tool (docs/specs/agent-graph-tool.md) ---
+
+test("POST /v1/agents accepts an optional graph_id, no existence/access validation at cadastro time", async () => {
+  const { post } = harness();
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:agents"] });
+
+  const { status, body } = await post(
+    "/v1/agents",
+    { name: "x", system_prompt: "y", model: "@cf/meta/llama-3.1-8b-instruct", tools: ["find_node"], graph_id: "g1" },
+    headers
+  );
+
+  assert.equal(status, 201);
+  assert.equal(body.graph_id, "g1");
+});
+
+test("PATCH /v1/agents/:id updates graph_id", async () => {
+  const db = createAgentsDB();
+  seedAgent(db, { id: "a1", owners: ["user-1"], graphId: "g1" });
+  const { patch } = harness({ AGENTS_DB: db });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:agents"] });
+
+  const { status, body } = await patch("/v1/agents/a1", { graph_id: "g2" }, headers);
+
+  assert.equal(status, 200);
+  assert.equal(body.graph_id, "g2");
+});
+
+test("POST /v1/sessions with an agent that has a graph_id snapshots agent_graph_id onto the session", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, {
+    id: "a1",
+    owners: ["user-1"],
+    model: "@cf/meta/llama-3.1-8b-instruct",
+    tools: ["find_node"],
+    graphId: "g1",
+  });
+  const { post, chatDb } = harness({ AGENTS_DB: agentsDb });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:chat"] });
+
+  const { status, body } = await post("/v1/sessions", { agent_id: "a1" }, headers);
+  assert.equal(status, 201);
+
+  const session = chatDb._sessions.find((s) => s.id === body.id);
+  assert.equal(session.agent_graph_id, "g1");
+});
+
+test("find_node executes with the graphId/actorSub from context (session's agent + real user), not from the model's own arguments", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, {
+    id: "a1",
+    owners: ["user-1"],
+    systemPrompt: "You are a helpful assistant.",
+    model: "@cf/meta/llama-3.1-8b-instruct",
+    tools: ["find_node"],
+    maxToolIterations: 5,
+    graphId: "g1",
+  });
+
+  const ai = createToolCallingAI({
+    turns: [
+      { tool_calls: [{ name: "find_node", arguments: { type: "Ingredient", label: "Salt" } }] },
+      { response: "Found the Salt node." },
+    ],
+  });
+
+  const graphCalls = [];
+  const graphWorker = {
+    async findNodeByLabel(graphId, actorSub, type, label) {
+      graphCalls.push({ graphId, actorSub, type, label });
+      return { id: "n1", graph_id: graphId, type, label, properties: null, source_document_id: null };
+    },
+  };
+
+  const { post, get } = harness({ AGENTS_DB: agentsDb, AI: ai, GRAPH_WORKER: graphWorker });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:chat", "ai:agents"] });
+
+  const created = await post("/v1/sessions", { agent_id: "a1" }, headers);
+  const sessionId = created.body.id;
+
+  const sent = await post(`/v1/sessions/${sessionId}/messages`, { content: "find salt" }, headers);
+
+  assert.equal(sent.status, 200);
+  assert.equal(sent.body.message.content, "Found the Salt node.");
+
+  assert.equal(graphCalls.length, 1);
+  assert.deepEqual(graphCalls[0], { graphId: "g1", actorSub: "user-1", type: "Ingredient", label: "Salt" });
+
+  const messages = (await get(`/v1/sessions/${sessionId}/messages`, headers)).body.data;
+  const toolMessage = messages.find((m) => m.role === "tool");
+  const toolResult = JSON.parse(toolMessage.content);
+  assert.equal(toolResult.id, "n1");
+  assert.equal(toolResult.label, "Salt");
+});
+
+test("find_node returns { found: false } (not an error) when no node matches type/label", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, {
+    id: "a1",
+    owners: ["user-1"],
+    model: "@cf/meta/llama-3.1-8b-instruct",
+    tools: ["find_node"],
+    maxToolIterations: 5,
+    graphId: "g1",
+  });
+
+  const ai = createToolCallingAI({
+    turns: [
+      { tool_calls: [{ name: "find_node", arguments: { type: "Ingredient", label: "Unobtainium" } }] },
+      { response: "I could not find that node." },
+    ],
+  });
+
+  const graphWorker = { async findNodeByLabel() { return null; } };
+
+  const { post, get } = harness({ AGENTS_DB: agentsDb, AI: ai, GRAPH_WORKER: graphWorker });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:chat", "ai:agents"] });
+
+  const created = await post("/v1/sessions", { agent_id: "a1" }, headers);
+  const sessionId = created.body.id;
+
+  const sent = await post(`/v1/sessions/${sessionId}/messages`, { content: "find unobtainium" }, headers);
+
+  assert.equal(sent.status, 200);
+  assert.equal(sent.body.message.content, "I could not find that node.");
+
+  const messages = (await get(`/v1/sessions/${sessionId}/messages`, headers)).body.data;
+  const toolMessage = messages.find((m) => m.role === "tool");
+  const toolResult = JSON.parse(toolMessage.content);
+  assert.deepEqual(toolResult, { found: false });
+});
+
+test("find_node access denied (graph-worker's requireRole throwing) becomes a normal tool error, the loop continues", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, {
+    id: "a1",
+    owners: ["user-1"],
+    model: "@cf/meta/llama-3.1-8b-instruct",
+    tools: ["find_node"],
+    maxToolIterations: 5,
+    graphId: "g1",
+  });
+
+  const ai = createToolCallingAI({
+    turns: [
+      { tool_calls: [{ name: "find_node", arguments: { type: "Ingredient", label: "Salt" } }] },
+      { response: "I don't have access to look that up." },
+    ],
+  });
+
+  const graphWorker = {
+    async findNodeByLabel() {
+      throw new Error("No access to this graph");
+    },
+  };
+
+  const { post, get } = harness({ AGENTS_DB: agentsDb, AI: ai, GRAPH_WORKER: graphWorker });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:chat", "ai:agents"] });
+
+  const created = await post("/v1/sessions", { agent_id: "a1" }, headers);
+  const sessionId = created.body.id;
+
+  const sent = await post(`/v1/sessions/${sessionId}/messages`, { content: "find salt" }, headers);
+
+  assert.equal(sent.status, 200);
+  assert.equal(sent.body.message.content, "I don't have access to look that up.");
+
+  const messages = (await get(`/v1/sessions/${sessionId}/messages`, headers)).body.data;
+  const toolMessage = messages.find((m) => m.role === "tool");
+  const toolResult = JSON.parse(toolMessage.content);
+  assert.match(toolResult.error, /No access to this graph/);
+});
+
+test("find_node enabled but the agent has no graph_id configured fails with a clear tool error, not a crash", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, {
+    id: "a1",
+    owners: ["user-1"],
+    model: "@cf/meta/llama-3.1-8b-instruct",
+    tools: ["find_node"],
+    maxToolIterations: 5,
+    graphId: null,
+  });
+
+  const ai = createToolCallingAI({
+    turns: [
+      { tool_calls: [{ name: "find_node", arguments: { type: "Ingredient", label: "Salt" } }] },
+      { response: "I could not look that up." },
+    ],
+  });
+
+  const graphWorker = { async findNodeByLabel() { throw new Error("should not be called"); } };
+
+  const { post, get } = harness({ AGENTS_DB: agentsDb, AI: ai, GRAPH_WORKER: graphWorker });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:chat", "ai:agents"] });
+
+  const created = await post("/v1/sessions", { agent_id: "a1" }, headers);
+  const sessionId = created.body.id;
+
+  const sent = await post(`/v1/sessions/${sessionId}/messages`, { content: "find salt" }, headers);
+
+  assert.equal(sent.status, 200);
+  assert.equal(sent.body.message.content, "I could not look that up.");
+
+  const messages = (await get(`/v1/sessions/${sessionId}/messages`, headers)).body.data;
+  const toolMessage = messages.find((m) => m.role === "tool");
+  const toolResult = JSON.parse(toolMessage.content);
+  assert.match(toolResult.error, /Agent has no graph_id configured/);
+});
+
+test("find_node fails closed with a clear tool error when GRAPH_WORKER binding is not configured", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, {
+    id: "a1",
+    owners: ["user-1"],
+    model: "@cf/meta/llama-3.1-8b-instruct",
+    tools: ["find_node"],
+    maxToolIterations: 5,
+    graphId: "g1",
+  });
+
+  const ai = createToolCallingAI({
+    turns: [
+      { tool_calls: [{ name: "find_node", arguments: { type: "Ingredient", label: "Salt" } }] },
+      { response: "I could not look that up." },
+    ],
+  });
+
+  const { post, get } = harness({ AGENTS_DB: agentsDb, AI: ai, GRAPH_WORKER: undefined });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:chat", "ai:agents"] });
+
+  const created = await post("/v1/sessions", { agent_id: "a1" }, headers);
+  const sessionId = created.body.id;
+
+  const sent = await post(`/v1/sessions/${sessionId}/messages`, { content: "find salt" }, headers);
+
+  assert.equal(sent.status, 200);
+
+  const messages = (await get(`/v1/sessions/${sessionId}/messages`, headers)).body.data;
+  const toolMessage = messages.find((m) => m.role === "tool");
+  const toolResult = JSON.parse(toolMessage.content);
+  assert.match(toolResult.error, /GRAPH_WORKER binding not configured/);
+});
+
+test("two agents with different graph_ids stay independent -- no context leakage between them in the same session-less flow", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, { id: "a1", owners: ["user-1"], tools: ["find_node"], maxToolIterations: 5, graphId: "g1" });
+  seedAgent(agentsDb, { id: "a2", owners: ["user-1"], tools: ["find_node"], maxToolIterations: 5, graphId: "g2" });
+
+  const graphCalls = [];
+  const graphWorker = {
+    async findNodeByLabel(graphId, actorSub, type, label) {
+      graphCalls.push({ graphId, actorSub, type, label });
+      return { id: `${graphId}-n1`, graph_id: graphId, type, label, properties: null, source_document_id: null };
+    },
+  };
+
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:chat", "ai:agents"] });
+
+  const ai1 = createToolCallingAI({
+    turns: [{ tool_calls: [{ name: "find_node", arguments: { type: "Ingredient", label: "Salt" } }] }, { response: "done 1" }],
+  });
+  const h1 = harness({ AGENTS_DB: agentsDb, AI: ai1, GRAPH_WORKER: graphWorker });
+  const s1 = await h1.post("/v1/sessions", { agent_id: "a1" }, headers);
+  await h1.post(`/v1/sessions/${s1.body.id}/messages`, { content: "find salt" }, headers);
+
+  const ai2 = createToolCallingAI({
+    turns: [{ tool_calls: [{ name: "find_node", arguments: { type: "Ingredient", label: "Salt" } }] }, { response: "done 2" }],
+  });
+  const h2 = harness({ AGENTS_DB: agentsDb, AI: ai2, GRAPH_WORKER: graphWorker });
+  const s2 = await h2.post("/v1/sessions", { agent_id: "a2" }, headers);
+  await h2.post(`/v1/sessions/${s2.body.id}/messages`, { content: "find salt" }, headers);
+
+  assert.equal(graphCalls.length, 2);
+  assert.equal(graphCalls[0].graphId, "g1");
+  assert.equal(graphCalls[1].graphId, "g2");
+});
+
+test("query_knowledge_base still works unchanged with the new execute(env, args, context) signature (context ignored)", async () => {
+  const agentsDb = createAgentsDB();
+  seedAgent(agentsDb, {
+    id: "a1",
+    owners: ["user-1"],
+    model: "@cf/meta/llama-3.1-8b-instruct",
+    tools: ["query_knowledge_base"],
+    maxToolIterations: 5,
+  });
+
+  const ai = createToolCallingAI({
+    turns: [
+      { tool_calls: [{ name: "query_knowledge_base", arguments: { question: "what is x?" } }] },
+      { response: "42." },
+    ],
+  });
+  const ragWorker = { async query(question) { return { question, answer: "x is 42", sources: [] }; } };
+
+  const { post } = harness({ AGENTS_DB: agentsDb, AI: ai, RAG_WORKER: ragWorker });
+  const headers = await authHeader({ sub: "user-1", permissions: ["ai:chat", "ai:agents"] });
+
+  const created = await post("/v1/sessions", { agent_id: "a1" }, headers);
+  const sessionId = created.body.id;
+
+  const sent = await post(`/v1/sessions/${sessionId}/messages`, { content: "what is x?" }, headers);
+
+  assert.equal(sent.status, 200);
+  assert.equal(sent.body.message.content, "42.");
 });
