@@ -20,7 +20,8 @@ d1_databases = {
       "migrations/0009_seed_ingredient_permissions.sql",
       "migrations/0011_seed_ai_permissions.sql",
       "migrations/0012_seed_auth_stats_permission.sql",
-      "migrations/0013_add_graphrag_permission.sql"
+      "migrations/0013_add_graphrag_permission.sql",
+      "migrations/0017_seed_agent_permissions.sql"
     ]
   }
   ingredient = {
@@ -49,7 +50,16 @@ d1_databases = {
     run_migrations        = true
     migrations = [
       "migrations/0014_create_chat_sessions.sql",
-      "migrations/0015_add_chat_access.sql"
+      "migrations/0015_add_chat_access.sql",
+      "migrations/0018_add_agent_snapshot_to_chat_sessions.sql"
+    ]
+  }
+  agents = {
+    name                  = "dev-agents"
+    primary_location_hint = "wnam"
+    run_migrations        = true
+    migrations = [
+      "migrations/0016_create_agents.sql"
     ]
   }
 }
@@ -92,6 +102,11 @@ workers = {
         name         = "CHAT_DB"
         type         = "d1"
         resource_key = "chat"
+      },
+      {
+        name         = "AGENTS_DB"
+        type         = "d1"
+        resource_key = "agents"
       }
     ]
   }
