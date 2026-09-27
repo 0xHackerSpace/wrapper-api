@@ -1,11 +1,15 @@
 import { generateToken, verifyToken } from "./lib/jwt.mjs";
-import { json, error, unauthorized, badRequest, notFound, internalError } from "./lib/response.mjs";
+import { json, error, unauthorized, badRequest, notFound, internalError, CORS_HEADERS } from "./lib/response.mjs";
 import { getUserByUsername, updateLastLogin, logAuthAttempt, createUser, getUserPermissions, getUserProfiles } from "./lib/db.mjs";
 import { verifyPassword, hashPassword, generateRandomId } from "./lib/password.mjs";
 import { requirePermission, AuthError } from "./lib/auth.mjs";
 
 export default {
   async fetch(request, env, ctx) {
+    if (request.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: CORS_HEADERS });
+    }
+
     const url = new URL(request.url);
     const { pathname, searchParams } = url;
 
