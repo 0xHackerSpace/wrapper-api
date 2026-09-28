@@ -653,7 +653,8 @@ function harness(overrides = {}) {
 
   const call = async (path, init) => {
     const response = await worker.fetch(new Request(`https://ai.test${path}`, init));
-    return { status: response.status, body: await response.json() };
+    const text = await response.text();
+    return { status: response.status, headers: response.headers, body: text ? JSON.parse(text) : null };
   };
   const get = (path, headers = {}) => call(path, { method: "GET", headers });
   const post = (path, body, headers = {}) =>
@@ -782,6 +783,24 @@ test("GET /health reports service status", async () => {
   assert.equal(status, 200);
   assert.equal(body.service, "ai");
   assert.equal(body.status, "ok");
+});
+
+test("OPTIONS preflight requests return 204 with CORS headers", async () => {
+  const { call } = harness();
+  const { status, headers, body } = await call("/v1/sessions", { method: "OPTIONS" });
+
+  assert.equal(status, 204);
+  assert.equal(body, null);
+  assert.equal(headers.get("access-control-allow-origin"), "*");
+  assert.equal(headers.get("access-control-allow-methods"), "GET, POST, PATCH, DELETE, PUT, OPTIONS");
+  assert.equal(headers.get("access-control-allow-headers"), "Content-Type, Authorization");
+});
+
+test("normal responses include the Access-Control-Allow-Origin header", async () => {
+  const { get } = harness();
+  const { headers } = await get("/health");
+
+  assert.equal(headers.get("access-control-allow-origin"), "*");
 });
 
 test("GET / and GET /v1 describe available endpoints", async () => {

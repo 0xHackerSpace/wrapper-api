@@ -1,5 +1,5 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
-import { json, badRequest, notFound, internalError, conflict } from "./lib/response.mjs";
+import { json, badRequest, notFound, internalError, conflict, CORS_HEADERS } from "./lib/response.mjs";
 import {
   chatCompletion,
   chatCompletionStream,
@@ -59,6 +59,10 @@ const DEFAULT_MAX_TOOL_ITERATIONS = 5;
 
 export default class extends WorkerEntrypoint {
   async fetch(request) {
+    if (request.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: CORS_HEADERS });
+    }
+
     const url = new URL(request.url);
     const { pathname } = url;
 
@@ -288,7 +292,7 @@ async function streamChatCompletionResponse(ai, validated) {
 
   return new Response(stream, {
     status: 200,
-    headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" },
+    headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive", ...CORS_HEADERS },
   });
 }
 
@@ -611,7 +615,7 @@ async function streamSendMessageResponse(env, sessionId, modelMessages, { aiOpti
 
   return new Response(stream, {
     status: 200,
-    headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" },
+    headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive", ...CORS_HEADERS },
   });
 }
 
