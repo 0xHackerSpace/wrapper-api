@@ -9,6 +9,7 @@ const workers = [
   { name: "rag", entry: "terraform/workers/rag/index.mjs", output: "terraform/workers/rag/dist/index.mjs" },
   { name: "graph", entry: "terraform/workers/graph/src/index.mjs", output: "terraform/workers/graph/dist/index.mjs" },
   { name: "graphrag", entry: "terraform/workers/graphrag/src/index.mjs", output: "terraform/workers/graphrag/dist/index.mjs" },
+  { name: "huggingface", entry: "terraform/workers/huggingface/src/index.mjs", output: "terraform/workers/huggingface/dist/index.mjs" },
 ];
 
 for (const worker of workers) {
