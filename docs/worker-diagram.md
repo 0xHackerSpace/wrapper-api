@@ -1,6 +1,6 @@
 # Diagrama de Dependências: Workers e Bancos de Dados
 
-Mapeia os 6 Cloudflare Workers do projeto, seus bindings de dados (D1, R2, Vectorize, Workers AI) e as chamadas Service Binding (RPC) entre eles — fonte: `terraform/environments/dev/terraform.tfvars`, `terraform/locals.tf`, `terraform/rag.tf` e `terraform/modules/rag/main.tf`.
+Mapeia os 7 Cloudflare Workers do projeto, seus bindings de dados (D1, R2, Vectorize, Workers AI) e as chamadas Service Binding (RPC) entre eles — fonte: `terraform/environments/dev/terraform.tfvars`, `terraform/locals.tf`, `terraform/rag.tf` e `terraform/modules/rag/main.tf`.
 
 ```mermaid
 flowchart LR
@@ -11,6 +11,7 @@ flowchart LR
         graphw[graph-worker]
         rag[rag-worker]
         graphrag[graphrag-worker]
+        hf[huggingface-worker]
     end
 
     subgraph Dados
@@ -44,7 +45,7 @@ flowchart LR
     graphrag -.->|RPC: AI_WORKER| ai
 ```
 
-Legenda: seta sólida = binding direto de dados (D1/R2/Vectorize/Workers AI); seta pontilhada = Service Binding (chamada RPC via `WorkerEntrypoint`, ver [ADR 0015](decisions/0015-service-bindings-rpc-worker-communication.md)).
+Legenda: seta sólida = binding direto de dados (D1/R2/Vectorize/Workers AI); seta pontilhada = Service Binding (chamada RPC via `WorkerEntrypoint`, ver [ADR 0015](decisions/0015-service-bindings-rpc-worker-communication.md)). `huggingface-worker` não aparece com nenhuma seta — é isolado (sem D1/R2/Vectorize próprio, sem Service Binding de/para nenhum outro worker, ver [ADR 0026](decisions/0026-huggingface-worker.md)).
 
 ## Bindings por worker
 
@@ -56,8 +57,9 @@ Legenda: seta sólida = binding direto de dados (D1/R2/Vectorize/Workers AI); se
 | `graph` | D1 `dev-graph` (`GRAPH_DB`) | expõe `upsertNode`/`updateNode`/`deleteNode`/`createEdge`/`getNeighbors`/`findPaths`/`findNodeByLabel` | sim |
 | `rag` | Workers AI (`AI`), Vectorize (`VECTORIZE`), R2 (`DOCUMENTS`) | → `graph` (`GRAPH_WORKER`), → `ai` (`AI_WORKER`) | **não** (ver nota) |
 | `graphrag` | nenhum (orquestrador puro, sem D1/R2/Vectorize próprio) | → `rag` (`RAG_WORKER`), → `graph` (`GRAPH_WORKER`), → `ai` (`AI_WORKER`) | sim |
+| `huggingface` | nenhum (stateless, proxy para `router.huggingface.co`) | — | sim (mais `HF_TOKEN`, escopado só a este worker, ver [ADR 0026](decisions/0026-huggingface-worker.md)) |
 
-`JWT_SECRET` é injetado automaticamente em todo worker declarado em `var.workers` (`terraform/locals.tf`, `local.jwt_secret_binding` concatenado a cada binding set). `rag-worker` é declarado em `var.rag_stacks`, um caminho Terraform separado (`terraform/rag.tf`) que **não** concatena esse binding — por isso é o único worker sem `JWT_SECRET` garantido, e o motivo de seu `requireAuth` pular a checagem quando a env var está ausente (única exceção a "falha fechado" entre os 6 workers, documentada no [spec ai-chat-and-auth-stats](specs/ai-chat-and-auth-stats-permissions.md)).
+`JWT_SECRET` é injetado automaticamente em todo worker declarado em `var.workers` (`terraform/locals.tf`, `local.jwt_secret_binding` concatenado a cada binding set). `rag-worker` é declarado em `var.rag_stacks`, um caminho Terraform separado (`terraform/rag.tf`) que **não** concatena esse binding — por isso é o único worker sem `JWT_SECRET` garantido, e o motivo de seu `requireAuth` pular a checagem quando a env var está ausente (única exceção a "falha fechado" entre os 7 workers, documentada no [spec ai-chat-and-auth-stats](specs/ai-chat-and-auth-stats-permissions.md)).
 
 ## Notas
 

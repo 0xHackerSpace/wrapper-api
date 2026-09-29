@@ -242,6 +242,42 @@ POST   /v1/graphrag/query     - Q&A híbrido (RAG + travessia do grafo)
 
 Resposta: `{ question, answer, sources, graphContext }`.
 
+## Huggingface Worker (Inference Providers)
+
+Conforme [ADR 0026](decisions/0026-huggingface-worker.md), `huggingface-worker` é o sétimo Worker do projeto: um proxy autenticado e stateless para a API de **Inference Providers** da Hugging Face (`router.huggingface.co`), cobrindo 19 tasks de ML via 19 rotas explícitas. Totalmente segmentado do `ai-worker` — sem D1 próprio, sem Service Bindings de/para nenhum outro worker.
+
+```
+GET    /health                              - Health check (público)
+GET    /  ou  GET /v1                       - Informações do serviço (público)
+POST   /v1/chat/completions                 - Chat completion, compatível com OpenAI; stream: true retorna SSE (passthrough direto da HF)
+POST   /v1/text-generation                  - JSON { model, inputs, parameters?, provider? }
+POST   /v1/feature-extraction               - JSON { model, inputs, provider? }
+POST   /v1/fill-mask                        - JSON { model, inputs, provider? }
+POST   /v1/question-answering               - JSON { model, inputs: { question, context }, provider? }
+POST   /v1/summarization                    - JSON { model, inputs, parameters?, provider? }
+POST   /v1/table-question-answering         - JSON { model, inputs: { query, table }, provider? }
+POST   /v1/text-classification              - JSON { model, inputs, provider? }
+POST   /v1/token-classification             - JSON { model, inputs, provider? }
+POST   /v1/translation                      - JSON { model, inputs, parameters?, provider? }
+POST   /v1/zero-shot-classification         - JSON { model, inputs, parameters: { candidate_labels }, provider? }
+POST   /v1/text-to-image                    - JSON in, retorna binário image/*
+POST   /v1/text-to-video                    - JSON in, retorna binário video/*
+POST   /v1/image-to-image                   - Binário image/* + model/provider/params via query string, retorna binário image/*
+POST   /v1/image-classification             - Binário image/* + model/provider via query string, retorna JSON
+POST   /v1/image-segmentation               - Binário image/* + model/provider via query string, retorna JSON
+POST   /v1/object-detection                 - Binário image/* + model/provider via query string, retorna JSON
+POST   /v1/automatic-speech-recognition     - Binário audio/* + model/provider via query string, retorna JSON
+POST   /v1/audio-classification             - Binário audio/* + model/provider via query string, retorna JSON
+```
+
+Todas as 19 rotas de task exigem JWT Bearer com a permission `huggingface:use` (migration `0026_seed_huggingface_permission.sql`, hoje atribuída só ao profile `Admin`) — uma única permission cobre todas as tasks, diferente do split `ai:chat`/`ai:agents`/`ai:teams` do `ai-worker`, já que aqui todas as rotas são a mesma capacidade conceitual. `GET /health`, `GET /` e `GET /v1` continuam públicos.
+
+Nas 10 rotas JSON e nas 2 rotas de saída binária (`text-to-image`/`text-to-video`), `model` é obrigatório no corpo e `provider` é opcional (default `hf-inference` quando omitido, o único provider cujo formato de URL foi confirmado no código-fonte do SDK oficial da HF). Nas 6 rotas de entrada binária (`image-to-image`, `image-classification`, `image-segmentation`, `object-detection`, `automatic-speech-recognition`, `audio-classification`), o corpo da request é o binário puro do cliente (repassado verbatim à HF, sem base64/multipart/envelope JSON) e `model`/`provider` chegam via query string (`?model=&provider=`), já que o `Content-Type: image/*`/`audio/*` não deixa espaço para metadados no corpo.
+
+`POST /v1/chat/completions` é o único endpoint unificado e OpenAI-compatível da HF; as outras 18 tasks usam o formato nativo `inputs`/`parameters` da HF, sem tradução. Erros da HF (4xx, 5xx, falha de rede) são traduzidos para `{ error: { message, type: "invalid_request_error" } }`, preservando o status HTTP original quando aplicável (mesmo formato de `ai-worker`/`graph-worker`/`graphrag-worker`).
+
 ## Gerenciamento de Secrets
 
 Conforme [ADR 0005](decisions/0005-jwt-secret-management.md), `JWT_SECRET` é uma variável Terraform sensível injetada em todos os Workers como binding de tipo `secret_text`. Nunca é commitado; definido via `export TF_VAR_jwt_secret="..."` ou HCP Terraform UI.
+
+Conforme [ADR 0026](decisions/0026-huggingface-worker.md), `HF_TOKEN` é uma segunda variável Terraform sensível (`hf_token`), injetada **só** no `huggingface-worker` (`key == "huggingface" ? local.hf_token_binding : []` em `terraform/locals.tf`) — diferente de `JWT_SECRET`, que é global a todos os Workers. Nunca é commitado; definido via `export TF_VAR_hf_token="hf_..."`, mesmo fluxo de `TF_VAR_jwt_secret`.

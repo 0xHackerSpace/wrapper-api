@@ -38,6 +38,13 @@ variable "jwt_secret" {
   default     = ""
 }
 
+variable "hf_token" {
+  description = "Hugging Face personal access token with Inference Providers permission."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
 variable "kv_namespaces" {
   description = "KV namespaces keyed by a stable logical name."
   type        = map(object({ title = optional(string) }))

@@ -15,13 +15,14 @@
 ## Architecture
 
 ```
-Cloudflare Workers (6 workers) + D1 + R2 + KV + Queues
+Cloudflare Workers (7 workers) + D1 + R2 + KV + Queues
 ├── api-worker: CRUD de ingredientes
 ├── auth-worker: JWT, autenticação
 ├── rag-worker: Busca semântica (Vectorize + BGE embeddings)
 ├── ai-worker: Chat completions (OpenAI-compatível, Cloudflare AI)
 ├── graph-worker: Grafo de conhecimento (nodes/edges, complemento ao RAG)
-└── graphrag-worker: Q&A híbrido (RAG + travessia do grafo), consome os outros 3 via Service Binding
+├── graphrag-worker: Q&A híbrido (RAG + travessia do grafo), consome os outros 3 via Service Binding
+└── huggingface-worker: Proxy autenticado para a API de Inference Providers da Hugging Face (19 tasks de ML), isolado (sem D1, sem Service Bindings)
 ```
 
 **Infraestrutura como Código**: Terraform gerencia todos os recursos via HCP Terraform (workspace: `0xHackerSpace/config/wrapper-api`)
@@ -31,7 +32,7 @@ Cloudflare Workers (6 workers) + D1 + R2 + KV + Queues
 ### Build & Deploy
 
 ```bash
-npm run build:workers        # Compila todos os 6 workers (esbuild)
+npm run build:workers        # Compila todos os 7 workers (esbuild)
 terraform plan              # Valida mudanças
 terraform apply            # Deploy para Cloudflare
 ```
@@ -190,6 +191,7 @@ Decisões arquiteturais documentadas em `docs/decisions/`:
 - **0023**: Tool calling para agents no `ai-worker` (function calling nativo via `@cf/meta/llama-3.1-8b-instruct`, tool `query_knowledge_base` via novo Service Binding `RAG_WORKER`, campos `tools`/`max_tool_iterations` no agent)
 - **0024**: Tool `find_node` (grafo) para agents no `ai-worker` (busca exata type+label via novo Service Binding `GRAPH_WORKER`, campo `graph_id` no agent, `actorSub` = usuário real da sessão)
 - **0025**: Teams de agents no `ai-worker` (D1 `dev-agents`, endpoints `/v1/teams/*`, `ai:teams` permission, 3 modos de orquestração — `pipeline`/`debate`/`orchestrator` — e `team_id` opcional em `POST /v1/sessions`, mutuamente exclusivo com `agent_id`, referência viva sem snapshot)
+- **0026**: Huggingface Worker — worker novo e stateless, proxy autenticado para a API de Inference Providers da Hugging Face (`router.huggingface.co`), 19 rotas/19 tasks, multi-provider, permission dedicada `huggingface:use`, secret `HF_TOKEN` escopado só a este worker (diferente do `JWT_SECRET` global)
 
 Ler antes de propor mudanças significativas em arquitetura.
 
