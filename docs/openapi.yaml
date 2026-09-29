@@ -3,10 +3,10 @@ info:
   title: Wrapper API
   version: "1.0.0"
   description: |
-    Documento OpenAPI unico cobrindo a superficie HTTP real dos 6 Cloudflare Workers do
-    projeto (`auth`, `api`, `ai`, `graph`, `rag`, `graphrag`). Mantido a mao, alinhado ao
-    codigo em `terraform/workers/{worker}/{src/,}index.mjs` -- ver `docs/specs/openapi-documentation.md`
-    para a spec que motivou este documento.
+    Documento OpenAPI unico cobrindo a superficie HTTP real dos 7 Cloudflare Workers do
+    projeto (`auth`, `api`, `ai`, `graph`, `rag`, `graphrag`, `huggingface`). Mantido a mao,
+    alinhado ao codigo em `terraform/workers/{worker}/{src/,}index.mjs` -- ver
+    `docs/specs/openapi-documentation.md` para a spec que motivou este documento.
 
     ## Fora de escopo: RPC via Service Binding
 
@@ -20,18 +20,19 @@ info:
 
     ## Rotas duplicadas entre workers (`/health`, `/`, `/v1`)
 
-    `GET /health` existe, com o mesmo path literal, nos 6 workers; `GET /` existe em
-    `auth`, `api`, `ai` e `graph`; `GET /v1` existe em `ai` e `graph` como alias do mesmo
-    handler de `GET /`. OpenAPI nao permite duas operacoes distintas sob a mesma chave
-    `path`+metodo no mesmo documento, entao essas rotas aparecem como uma unica operacao
-    cada, com `tags` listando todos os workers que a implementam e um `examples` nomeado
-    por worker mostrando o corpo real retornado por cada um.
+    `GET /health` existe, com o mesmo path literal, nos 7 workers; `GET /` existe em
+    `auth`, `api`, `ai`, `graph` e `huggingface`; `GET /v1` existe em `ai`, `graph` e
+    `huggingface` como alias do mesmo handler de `GET /`. OpenAPI nao permite duas
+    operacoes distintas sob a mesma chave `path`+metodo no mesmo documento, entao essas
+    rotas aparecem como uma unica operacao cada, com `tags` listando todos os workers que
+    a implementam e um `examples` nomeado por worker mostrando o corpo real retornado por
+    cada um.
 
     ## Erros: dois formatos, sem unificar
 
     - `auth-worker`, `api-worker` e `rag-worker` retornam `{ "error": "mensagem" }` (string
       plana) -- ver `AuthErrorResponse`.
-    - `ai-worker`, `graph-worker` e `graphrag-worker` retornam
+    - `ai-worker`, `graph-worker`, `graphrag-worker` e `huggingface-worker` retornam
       `{ "error": { "message": "...", "type": "invalid_request_error" } }` -- ver
       `ErrorResponse`.
 
@@ -51,6 +52,8 @@ servers:
     description: rag-worker (dev)
   - url: https://dev-graphrag.0xhackerspace.workers.dev
     description: graphrag-worker (dev)
+  - url: https://dev-huggingface.0xhackerspace.workers.dev
+    description: huggingface-worker (dev)
 tags:
   - name: auth
     description: auth-worker -- JWT, signup/login/refresh, estatisticas de usuarios.
@@ -64,6 +67,8 @@ tags:
     description: rag-worker -- ingestao e busca semantica (Vectorize + BGE embeddings).
   - name: graphrag
     description: graphrag-worker -- Q&A hibrido (RAG + travessia do grafo).
+  - name: huggingface
+    description: huggingface-worker -- proxy autenticado para a API de Inference Providers da Hugging Face (19 tasks de ML, multi-provider).
 components:
   securitySchemes:
     bearerAuth:
@@ -591,16 +596,47 @@ components:
         properties:
           type: object
       required: [from_node_id, to_node_id, relation]
+    HfJsonTaskRequest:
+      type: object
+      description: |
+        Corpo aceito pelas rotas JSON do huggingface-worker (chat completion tem seu
+        proprio schema, ver `/v1/chat/completions`). `inputs` varia de shape por task
+        (string na maioria das tasks; objeto em question-answering/table-question-answering)
+        -- ver `examples` de cada operacao. Repassado quase verbatim para a Hugging Face
+        (`{ inputs }` ou `{ inputs, parameters }` quando `parameters` e enviado).
+      properties:
+        model:
+          type: string
+          description: |
+            Nome do modelo na Hugging Face. Obrigatorio. Aceita sufixos nativos
+            (`:fastest`, `:cheapest`, `:preferred`, nome do provider) -- o worker nao
+            interpreta nem reescreve.
+        inputs: {}
+        parameters:
+          type: object
+        provider:
+          type: string
+          description: |
+            Provider explicito (ex. "together", "replicate"). Opcional. Default
+            "hf-inference" quando omitido (unico provider cujo formato de URL foi
+            confirmado no codigo-fonte do SDK oficial da HF).
+      required: [model, inputs]
+    HfTaskResponse:
+      type: object
+      description: |
+        Corpo retornado pela Hugging Face, repassado como veio (passthrough) -- o shape
+        varia por task e por provider; o huggingface-worker nao valida nem transforma a
+        resposta.
 paths:
   /health:
     get:
       operationId: getHealth
       summary: Liveness check
       description: |
-        Rota publica, sem autenticacao. Existe com o mesmo path literal nos 6 workers
-        (`auth`, `api`, `ai`, `graph`, `rag`, `graphrag`); cada um retorna um corpo
-        proprio -- ver `examples` por worker abaixo.
-      tags: [auth, api, ai, graph, rag, graphrag]
+        Rota publica, sem autenticacao. Existe com o mesmo path literal nos 7 workers
+        (`auth`, `api`, `ai`, `graph`, `rag`, `graphrag`, `huggingface`); cada um retorna
+        um corpo proprio -- ver `examples` por worker abaixo.
+      tags: [auth, api, ai, graph, rag, graphrag, huggingface]
       responses:
         "200":
           description: Worker saudavel. O corpo varia por worker (ver examples).
@@ -639,15 +675,22 @@ paths:
                     status: ok
                     environment: dev
                     bindings: { rag: true, graph: true, ai: true }
+                huggingface:
+                  summary: huggingface-worker
+                  value:
+                    service: huggingface
+                    status: ok
+                    environment: dev
   /:
     get:
       operationId: getInfo
       summary: Informacoes do servico
       description: |
         Rota publica, sem autenticacao. Existe com o mesmo path literal em `auth`,
-        `api`, `ai` e `graph` (em `ai` e `graph` tambem acessivel via `GET /v1`, ver
-        abaixo); cada um retorna um corpo proprio -- ver `examples` por worker.
-      tags: [auth, api, ai, graph]
+        `api`, `ai`, `graph` e `huggingface` (em `ai`, `graph` e `huggingface` tambem
+        acessivel via `GET /v1`, ver abaixo); cada um retorna um corpo proprio -- ver
+        `examples` por worker.
+      tags: [auth, api, ai, graph, huggingface]
       responses:
         "200":
           description: Metadados do servico (versao, endpoints, autenticacao). O corpo varia por worker.
@@ -713,14 +756,29 @@ paths:
                     authentication:
                       type: "JWT Bearer Token"
                       header: "Authorization: Bearer {token}"
+                huggingface:
+                  summary: huggingface-worker
+                  value:
+                    service: huggingface
+                    version: "1.0.0"
+                    description: "Proxy autenticado para a API de Inference Providers da Hugging Face (router.huggingface.co) -- 19 tasks de ML, multi-provider"
+                    environment: dev
+                    endpoints:
+                      health: "GET /health"
+                      info: "GET / or GET /v1"
+                      chat_completions: "POST /v1/chat/completions (requires auth, huggingface:use; JSON { model, messages, provider?, stream? }, OpenAI-compatible, streams SSE when stream: true)"
+                    authentication:
+                      type: "JWT Bearer Token"
+                      header: "Authorization: Bearer {token}"
+                      permission: huggingface:use
   /v1:
     get:
       operationId: getInfoV1Alias
       summary: Informacoes do servico (alias de GET /)
       description: |
-        Alias de `GET /` em `ai-worker` e `graph-worker` (mesmo handler, mesmo corpo).
-        Rota publica, sem autenticacao.
-      tags: [ai, graph]
+        Alias de `GET /` em `ai-worker`, `graph-worker` e `huggingface-worker` (mesmo
+        handler, mesmo corpo). Rota publica, sem autenticacao.
+      tags: [ai, graph, huggingface]
       responses:
         "200":
           description: Mesmo corpo de `GET /` para o worker correspondente.
@@ -3360,6 +3418,997 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "403":
           description: Token valido mas sem a permission `graphrag:query`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/chat/completions:
+    post:
+      operationId: postHfV1ChatCompletions
+      summary: Chat completion via Hugging Face Inference Providers (compativel com OpenAI)
+      description: |
+        Requer JWT + permission `huggingface:use`. Unico endpoint unificado e
+        OpenAI-compatible da Hugging Face -- `provider` (incluindo `"auto"`/omitido) e
+        sempre repassado a HF verbatim, sem default local (diferente das outras 18
+        tasks, que usam `hf-inference` como default). Quando `stream: true`, a resposta
+        e `text/event-stream` com eventos `chat.completion.chunk`, ja no formato OpenAI
+        entregue pela propria HF -- passthrough direto do `ReadableStream`, sem parsing
+        no meio (diferente do `ai-worker`, que traduz o SSE bruto da Workers AI).
+      tags: [huggingface]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                model:
+                  type: string
+                messages:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/ChatCompletionMessageInput"
+                provider:
+                  type: string
+                  description: '"auto" (padrao da HF), nome de um provider especifico, ou omitido.'
+                stream:
+                  type: boolean
+                  default: false
+              required: [model, messages]
+            examples:
+              minimal:
+                summary: Sem provider explicito (policy "auto"/:fastest da HF)
+                value:
+                  model: "openai/gpt-oss-120b"
+                  messages:
+                    - role: user
+                      content: "Explique o que é chimichurri em duas frases."
+              withProvider:
+                summary: Com provider explicito
+                value:
+                  model: "openai/gpt-oss-120b"
+                  provider: groq
+                  messages:
+                    - role: user
+                      content: "Explique o que é chimichurri em duas frases."
+              streaming:
+                summary: Com stream (SSE chat.completion.chunk, passthrough da HF)
+                value:
+                  model: "openai/gpt-oss-120b"
+                  messages:
+                    - role: user
+                      content: "Explique o que é chimichurri em duas frases."
+                  stream: true
+      responses:
+        "200":
+          description: |
+            Chat completion no formato OpenAI, ou (quando `stream: true`) um
+            `text/event-stream` de eventos `chat.completion.chunk`, repassado verbatim
+            da Hugging Face.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HfTaskResponse"
+            text/event-stream:
+              schema:
+                type: string
+                description: Passthrough direto do `ReadableStream` de SSE da Hugging Face.
+        "400":
+          description: Corpo invalido (JSON malformado, `model`/`messages` ausente).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Sem token de autenticacao.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Token valido mas sem a permission `huggingface:use`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          description: Falha de rede ao alcançar router.huggingface.co.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/text-generation:
+    post:
+      operationId: postHfV1TextGeneration
+      summary: Text generation via Hugging Face Inference Providers
+      description: |
+        Requer JWT + permission `huggingface:use`. Task `text-generation`. `provider`
+        omitido usa o default `hf-inference`.
+      tags: [huggingface]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HfJsonTaskRequest"
+            examples:
+              default:
+                value:
+                  model: "meta-llama/Llama-3.1-8B-Instruct"
+                  inputs: "Escreva uma receita curta de molho de alho."
+                  parameters: { max_new_tokens: 200 }
+      responses:
+        "200":
+          description: Resposta da HF (passthrough).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HfTaskResponse"
+        "400":
+          description: Corpo invalido ou `model` ausente.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Sem token de autenticacao.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Token valido mas sem a permission `huggingface:use`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/feature-extraction:
+    post:
+      operationId: postHfV1FeatureExtraction
+      summary: Feature extraction (embeddings) via Hugging Face Inference Providers
+      description: |
+        Requer JWT + permission `huggingface:use`. Task `feature-extraction`. Unica task
+        cuja URL usa a rota dedicada `.../pipeline/feature-extraction` em vez de
+        `.../models/{model}` (confirmado no codigo-fonte do SDK oficial da HF).
+      tags: [huggingface]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HfJsonTaskRequest"
+            examples:
+              default:
+                value:
+                  model: "sentence-transformers/all-MiniLM-L6-v2"
+                  inputs: "Alho combina bem com cebola e azeite de oliva."
+      responses:
+        "200":
+          description: Array de embeddings (passthrough da HF).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HfTaskResponse"
+        "400":
+          description: Corpo invalido ou `model` ausente.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Sem token de autenticacao.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Token valido mas sem a permission `huggingface:use`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/fill-mask:
+    post:
+      operationId: postHfV1FillMask
+      summary: Fill mask via Hugging Face Inference Providers
+      description: Requer JWT + permission `huggingface:use`. Task `fill-mask`.
+      tags: [huggingface]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HfJsonTaskRequest"
+            examples:
+              default:
+                value:
+                  model: "bert-base-uncased"
+                  inputs: "O alho combina bem com [MASK]."
+      responses:
+        "200":
+          description: Resposta da HF (passthrough).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HfTaskResponse"
+        "400":
+          description: Corpo invalido ou `model` ausente.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Sem token de autenticacao.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Token valido mas sem a permission `huggingface:use`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/question-answering:
+    post:
+      operationId: postHfV1QuestionAnswering
+      summary: Question answering via Hugging Face Inference Providers
+      description: |
+        Requer JWT + permission `huggingface:use`. Task `question-answering`. `inputs` e
+        um objeto `{ question, context }`, diferente da maioria das tasks JSON (string).
+      tags: [huggingface]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HfJsonTaskRequest"
+            examples:
+              default:
+                value:
+                  model: "deepset/roberta-base-squad2"
+                  inputs:
+                    question: "Com que o alho combina bem?"
+                    context: "O alho combina bem com cebola e azeite de oliva na culinária mediterrânea."
+      responses:
+        "200":
+          description: Resposta da HF (passthrough).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HfTaskResponse"
+        "400":
+          description: Corpo invalido ou `model` ausente.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Sem token de autenticacao.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Token valido mas sem a permission `huggingface:use`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/summarization:
+    post:
+      operationId: postHfV1Summarization
+      summary: Summarization via Hugging Face Inference Providers
+      description: Requer JWT + permission `huggingface:use`. Task `summarization`.
+      tags: [huggingface]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HfJsonTaskRequest"
+            examples:
+              default:
+                value:
+                  model: "facebook/bart-large-cnn"
+                  inputs: "Texto longo sobre receitas com alho e azeite..."
+                  parameters: { max_length: 100 }
+      responses:
+        "200":
+          description: Resposta da HF (passthrough).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HfTaskResponse"
+        "400":
+          description: Corpo invalido ou `model` ausente.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Sem token de autenticacao.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Token valido mas sem a permission `huggingface:use`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/table-question-answering:
+    post:
+      operationId: postHfV1TableQuestionAnswering
+      summary: Table question answering via Hugging Face Inference Providers
+      description: |
+        Requer JWT + permission `huggingface:use`. Task `table-question-answering`.
+        `inputs` e um objeto `{ query, table }`.
+      tags: [huggingface]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HfJsonTaskRequest"
+            examples:
+              default:
+                value:
+                  model: "google/tapas-base-finetuned-wtq"
+                  inputs:
+                    query: "Qual ingrediente tem mais estoque?"
+                    table:
+                      ingrediente: ["Alho", "Cebola"]
+                      estoque: ["10", "5"]
+      responses:
+        "200":
+          description: Resposta da HF (passthrough).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HfTaskResponse"
+        "400":
+          description: Corpo invalido ou `model` ausente.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Sem token de autenticacao.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Token valido mas sem a permission `huggingface:use`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/text-classification:
+    post:
+      operationId: postHfV1TextClassification
+      summary: Text classification via Hugging Face Inference Providers
+      description: Requer JWT + permission `huggingface:use`. Task `text-classification`.
+      tags: [huggingface]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HfJsonTaskRequest"
+            examples:
+              default:
+                value:
+                  model: "distilbert-base-uncased-finetuned-sst-2-english"
+                  inputs: "Esse molho de alho ficou excelente!"
+      responses:
+        "200":
+          description: Resposta da HF (passthrough).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HfTaskResponse"
+        "400":
+          description: Corpo invalido ou `model` ausente.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Sem token de autenticacao.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Token valido mas sem a permission `huggingface:use`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/token-classification:
+    post:
+      operationId: postHfV1TokenClassification
+      summary: Token classification via Hugging Face Inference Providers
+      description: Requer JWT + permission `huggingface:use`. Task `token-classification`.
+      tags: [huggingface]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HfJsonTaskRequest"
+            examples:
+              default:
+                value:
+                  model: "dslim/bert-base-NER"
+                  inputs: "O alho é usado na culinária mediterrânea desde a Grécia Antiga."
+      responses:
+        "200":
+          description: Resposta da HF (passthrough).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HfTaskResponse"
+        "400":
+          description: Corpo invalido ou `model` ausente.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Sem token de autenticacao.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Token valido mas sem a permission `huggingface:use`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/translation:
+    post:
+      operationId: postHfV1Translation
+      summary: Translation via Hugging Face Inference Providers
+      description: Requer JWT + permission `huggingface:use`. Task `translation`.
+      tags: [huggingface]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HfJsonTaskRequest"
+            examples:
+              default:
+                value:
+                  model: "Helsinki-NLP/opus-mt-pt-en"
+                  inputs: "O alho combina bem com cebola."
+                  parameters: { src_lang: "pt", tgt_lang: "en" }
+      responses:
+        "200":
+          description: Resposta da HF (passthrough).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HfTaskResponse"
+        "400":
+          description: Corpo invalido ou `model` ausente.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Sem token de autenticacao.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Token valido mas sem a permission `huggingface:use`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/zero-shot-classification:
+    post:
+      operationId: postHfV1ZeroShotClassification
+      summary: Zero-shot classification via Hugging Face Inference Providers
+      description: |
+        Requer JWT + permission `huggingface:use`. Task `zero-shot-classification`.
+        `parameters.candidate_labels` e obrigatorio (a HF valida; o worker so repassa).
+      tags: [huggingface]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HfJsonTaskRequest"
+            examples:
+              default:
+                value:
+                  model: "facebook/bart-large-mnli"
+                  inputs: "Esse texto fala sobre culinária."
+                  parameters:
+                    candidate_labels: ["culinária", "esporte", "política"]
+      responses:
+        "200":
+          description: Resposta da HF (passthrough).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HfTaskResponse"
+        "400":
+          description: Corpo invalido, `model` ausente ou `candidate_labels` invalido (validado pela propria HF).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Sem token de autenticacao.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Token valido mas sem a permission `huggingface:use`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/text-to-image:
+    post:
+      operationId: postHfV1TextToImage
+      summary: Text-to-image via Hugging Face Inference Providers
+      description: |
+        Requer JWT + permission `huggingface:use`. Task `text-to-image`. Corpo JSON de
+        entrada, resposta binaria (`image/*`) -- o worker proxeia a resposta da HF
+        verbatim, sem decodificar/recodificar.
+      tags: [huggingface]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HfJsonTaskRequest"
+            examples:
+              default:
+                value:
+                  model: "black-forest-labs/FLUX.1-dev"
+                  inputs: "Um prato de comida mediterrânea com alho e azeite, estilo fotografia de revista"
+      responses:
+        "200":
+          description: Imagem gerada, formato conforme `Content-Type` retornado pela HF.
+          content:
+            image/*:
+              schema:
+                type: string
+                format: binary
+        "400":
+          description: Corpo invalido ou `model` ausente.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Sem token de autenticacao.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Token valido mas sem a permission `huggingface:use`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/text-to-video:
+    post:
+      operationId: postHfV1TextToVideo
+      summary: Text-to-video via Hugging Face Inference Providers
+      description: |
+        Requer JWT + permission `huggingface:use`. Task `text-to-video`. Corpo JSON de
+        entrada, resposta binaria (`video/*`) -- proxy verbatim.
+      tags: [huggingface]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HfJsonTaskRequest"
+            examples:
+              default:
+                value:
+                  model: "damo-vilab/text-to-video-ms-1.7b"
+                  inputs: "Uma panela de alho refogando em azeite, câmera lenta"
+      responses:
+        "200":
+          description: Video gerado, formato conforme `Content-Type` retornado pela HF.
+          content:
+            video/*:
+              schema:
+                type: string
+                format: binary
+        "400":
+          description: Corpo invalido ou `model` ausente.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Sem token de autenticacao.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Token valido mas sem a permission `huggingface:use`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/image-to-image:
+    post:
+      operationId: postHfV1ImageToImage
+      summary: Image-to-image via Hugging Face Inference Providers
+      description: |
+        Requer JWT + permission `huggingface:use`. Task `image-to-image`. Entrada
+        binaria pura (corpo cru da request, sem envelope JSON/multipart) -- `model`
+        (obrigatorio) e `provider` (opcional) vao via query string; quaisquer outros
+        query params (ex. `prompt`) sao repassados como query params extras na URL de
+        saida para a HF -- comportamento pragmatico, marcado como nao confirmado nos
+        "Casos a verificar" da spec (`docs/specs/huggingface-worker.md`). Unica task que
+        mistura imagem de entrada com parametros adicionais.
+      tags: [huggingface]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: model
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: provider
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: prompt
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Repassado como query param extra na URL de saida para a HF (nao validado pelo worker).
+      requestBody:
+        required: true
+        content:
+          image/*:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "200":
+          description: Imagem gerada, formato conforme `Content-Type` retornado pela HF.
+          content:
+            image/*:
+              schema:
+                type: string
+                format: binary
+        "400":
+          description: '`model` ausente na query string.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Sem token de autenticacao.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Token valido mas sem a permission `huggingface:use`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/image-classification:
+    post:
+      operationId: postHfV1ImageClassification
+      summary: Image classification via Hugging Face Inference Providers
+      description: |
+        Requer JWT + permission `huggingface:use`. Task `image-classification`. Entrada
+        binaria pura -- `model` (obrigatorio) e `provider` (opcional) vao via query
+        string; o corpo da request e o binario cru (Content-Type real do arquivo,
+        ex. `image/png`, `image/jpeg`), repassado verbatim para a HF.
+      tags: [huggingface]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: model
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: provider
+          in: query
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          image/*:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "200":
+          description: Resposta da HF (passthrough), JSON.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HfTaskResponse"
+        "400":
+          description: '`model` ausente na query string.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Sem token de autenticacao.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Token valido mas sem a permission `huggingface:use`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/image-segmentation:
+    post:
+      operationId: postHfV1ImageSegmentation
+      summary: Image segmentation via Hugging Face Inference Providers
+      description: |
+        Requer JWT + permission `huggingface:use`. Task `image-segmentation`. Entrada
+        binaria pura, mesmo padrao de `/v1/image-classification` (`model`/`provider` via
+        query string, corpo = binario cru).
+      tags: [huggingface]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: model
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: provider
+          in: query
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          image/*:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "200":
+          description: Resposta da HF (passthrough), JSON.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HfTaskResponse"
+        "400":
+          description: '`model` ausente na query string.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Sem token de autenticacao.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Token valido mas sem a permission `huggingface:use`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/object-detection:
+    post:
+      operationId: postHfV1ObjectDetection
+      summary: Object detection via Hugging Face Inference Providers
+      description: |
+        Requer JWT + permission `huggingface:use`. Task `object-detection`. Entrada
+        binaria pura, mesmo padrao de `/v1/image-classification` (`model`/`provider` via
+        query string, corpo = binario cru).
+      tags: [huggingface]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: model
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: provider
+          in: query
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          image/*:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "200":
+          description: Resposta da HF (passthrough), JSON.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HfTaskResponse"
+        "400":
+          description: '`model` ausente na query string.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Sem token de autenticacao.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Token valido mas sem a permission `huggingface:use`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/automatic-speech-recognition:
+    post:
+      operationId: postHfV1AutomaticSpeechRecognition
+      summary: Automatic speech recognition via Hugging Face Inference Providers
+      description: |
+        Requer JWT + permission `huggingface:use`. Task `automatic-speech-recognition`.
+        Entrada binaria pura -- `model` (obrigatorio) e `provider` (opcional) vao via
+        query string; o corpo da request e o audio cru (Content-Type real do arquivo,
+        ex. `audio/wav`, `audio/mpeg`), repassado verbatim para a HF.
+      tags: [huggingface]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: model
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: provider
+          in: query
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          audio/*:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "200":
+          description: Resposta da HF (passthrough), JSON.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HfTaskResponse"
+        "400":
+          description: '`model` ausente na query string.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Sem token de autenticacao.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Token valido mas sem a permission `huggingface:use`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/audio-classification:
+    post:
+      operationId: postHfV1AudioClassification
+      summary: Audio classification via Hugging Face Inference Providers
+      description: |
+        Requer JWT + permission `huggingface:use`. Task `audio-classification`. Entrada
+        binaria pura, mesmo padrao de `/v1/automatic-speech-recognition` (`model`/`provider`
+        via query string, corpo = audio cru).
+      tags: [huggingface]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: model
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: provider
+          in: query
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          audio/*:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "200":
+          description: Resposta da HF (passthrough), JSON.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HfTaskResponse"
+        "400":
+          description: '`model` ausente na query string.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Sem token de autenticacao.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Token valido mas sem a permission `huggingface:use`.
           content:
             application/json:
               schema:

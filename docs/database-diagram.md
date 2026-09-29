@@ -291,4 +291,4 @@ erDiagram
     agents ||--o{ chat_messages : "agent_id (logico, cross-database, qual membro gerou a mensagem)"
 ```
 
-`rag-worker` (Vectorize, fora do D1) e `graphrag-worker` (orquestrador sem estado próprio) não possuem tabelas — não aparecem nos diagramas acima. `dev-chat` e `dev-agents` são exclusivos do `ai-worker` — nenhum outro worker acessa essas tabelas, diretamente ou via RPC.
+`rag-worker` (Vectorize, fora do D1), `graphrag-worker` (orquestrador sem estado próprio) e `huggingface-worker` (proxy stateless para a API de Inference Providers da Hugging Face, sem D1 próprio, ver [ADR 0026](decisions/0026-huggingface-worker.md)) não possuem tabelas — não aparecem nos diagramas acima. `dev-chat` e `dev-agents` são exclusivos do `ai-worker` — nenhum outro worker acessa essas tabelas, diretamente ou via RPC.

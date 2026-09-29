@@ -7,6 +7,7 @@
 @baseUrlAI=https://dev-ai.0xhackerspace.workers.dev
 @baseUrlGraph=https://dev-graph.0xhackerspace.workers.dev
 @baseUrlGraphRAG=https://dev-graphrag.0xhackerspace.workers.dev
+@baseUrlHuggingFace=https://dev-huggingface.0xhackerspace.workers.dev
 @graphId=COLE_AQUI_O_ID_RETORNADO_POR_POST_/v1/graphs
 @sessionId=COLE_AQUI_O_ID_RETORNADO_POR_POST_/v1/sessions
 @agentId=COLE_AQUI_O_ID_RETORNADO_POR_POST_/v1/agents
@@ -998,6 +999,110 @@ Authorization: Bearer token-de-usuario-sem-permissao-graphrag-query
 {
   "question": "Com que ingredientes o alho combina bem?"
 }
+
+### ============================================
+### HUGGINGFACE WORKER (Inference Providers proxy)
+### ============================================
+### 19 rotas/19 tasks (ver docs/decisions/0026-huggingface-worker.md). Todas exigem
+### JWT Bearer + permission huggingface:use. Rotas JSON aceitam model/provider no corpo;
+### rotas binarias (image-to-image, image-classification, image-segmentation,
+### object-detection, automatic-speech-recognition, audio-classification) recebem o
+### binario cru no body e model/provider via query string (?model=&provider=), com o
+### Content-Type real do arquivo (image/png, image/jpeg, audio/wav, etc.), nao
+### application/json -- a HF usa esse Content-Type verbatim.
+
+### Health check
+GET {{baseUrlHuggingFace}}/health
+
+### Chat completion (compativel com OpenAI, unico endpoint unificado da HF)
+POST {{baseUrlHuggingFace}}/v1/chat/completions
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "model": "openai/gpt-oss-120b",
+  "messages": [
+    { "role": "user", "content": "Explique o que é chimichurri em duas frases." }
+  ]
+}
+
+### Chat completion com stream: true (passthrough direto do SSE da HF, sem tradução)
+POST {{baseUrlHuggingFace}}/v1/chat/completions
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "model": "openai/gpt-oss-120b",
+  "messages": [
+    { "role": "user", "content": "Explique o que é chimichurri em duas frases." }
+  ],
+  "stream": true
+}
+
+### Chat completion com provider explicito (sufixo :provider tambem funciona em model)
+POST {{baseUrlHuggingFace}}/v1/chat/completions
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "model": "openai/gpt-oss-120b",
+  "provider": "groq",
+  "messages": [
+    { "role": "user", "content": "Explique o que é chimichurri em duas frases." }
+  ]
+}
+
+### Feature extraction (embeddings) -- provider default hf-inference quando omitido
+POST {{baseUrlHuggingFace}}/v1/feature-extraction
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "model": "sentence-transformers/all-MiniLM-L6-v2",
+  "inputs": "Alho combina bem com cebola e azeite de oliva."
+}
+
+### Text-to-image -- retorna binario image/* (salve a resposta como .png no REST Client)
+POST {{baseUrlHuggingFace}}/v1/text-to-image
+Content-Type: application/json
+Authorization: Bearer {{jwtToken}}
+
+{
+  "model": "black-forest-labs/FLUX.1-dev",
+  "inputs": "Um prato de comida mediterrânea com alho e azeite, estilo fotografia de revista"
+}
+
+### Image classification -- entrada binaria pura (nao JSON): model/provider vao via query
+### string, o corpo da request e o arquivo de imagem cru, Content-Type = tipo real do
+### arquivo (nao application/json). No REST Client, use < ./caminho/para/imagem.jpg
+### (caminho relativo a este arquivo) para anexar um binario local ao body.
+POST {{baseUrlHuggingFace}}/v1/image-classification?model=google/vit-base-patch16-224
+Content-Type: image/jpeg
+Authorization: Bearer {{jwtToken}}
+
+< ./fixtures/sample-image.jpg
+
+### Rota de task sem token (expect 401)
+POST {{baseUrlHuggingFace}}/v1/feature-extraction
+Content-Type: application/json
+
+{
+  "model": "sentence-transformers/all-MiniLM-L6-v2",
+  "inputs": "teste"
+}
+
+### Rota de task com token valido mas sem huggingface:use (expect 403)
+POST {{baseUrlHuggingFace}}/v1/feature-extraction
+Content-Type: application/json
+Authorization: Bearer token-de-usuario-sem-permissao-huggingface-use
+
+{
+  "model": "sentence-transformers/all-MiniLM-L6-v2",
+  "inputs": "teste"
+}
+
+### Unknown route on huggingface worker (expect 404)
+GET {{baseUrlHuggingFace}}/v1/unknown
 
 ### ============================================
 ### NOTES
