@@ -13,6 +13,17 @@ locals {
     text = var.jwt_secret
   }] : []
 
+  # Worker-scoped secret, unlike jwt_secret_binding (injected into every
+  # worker) -- only huggingface-worker needs it. .tfvars files can't reference
+  # var.* directly (only literal values), so this can't be expressed via
+  # worker.additional_bindings the way non-sensitive bindings are; it has to
+  # be wired here instead, same reasoning as jwt_secret_binding.
+  hf_token_binding = var.hf_token != "" ? [{
+    name = "HF_TOKEN"
+    type = "secret_text"
+    text = var.hf_token
+  }] : []
+
   worker_bindings = {
     for key, worker in var.workers : key => concat(
       [for binding in worker.bindings : merge(
@@ -29,6 +40,7 @@ locals {
         sb.entrypoint != null ? { entrypoint = sb.entrypoint } : {}
       )],
       local.jwt_secret_binding,
+      key == "huggingface" ? local.hf_token_binding : [],
       worker.additional_bindings
     )
   }

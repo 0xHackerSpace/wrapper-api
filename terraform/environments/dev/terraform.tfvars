@@ -4,6 +4,7 @@ environment       = "dev"
 workers_subdomain = "0xhackerspace"
 # cloudflare_api_token should be set via environment variable or HCP Terraform UI
 jwt_secret = "dev-jwt-secret-key-32-characters-min"
+# hf_token should be set via environment variable (export TF_VAR_hf_token="hf_...") or HCP Terraform UI
 
 d1_databases = {
   auth = {
@@ -22,7 +23,8 @@ d1_databases = {
       "migrations/0012_seed_auth_stats_permission.sql",
       "migrations/0013_add_graphrag_permission.sql",
       "migrations/0017_seed_agent_permissions.sql",
-      "migrations/0024_seed_team_permissions.sql"
+      "migrations/0024_seed_team_permissions.sql",
+      "migrations/0026_seed_huggingface_permission.sql"
     ]
   }
   ingredient = {
@@ -140,6 +142,10 @@ workers = {
       { name = "GRAPH_WORKER", target_worker = "graph" },
       { name = "AI_WORKER", target_worker = "ai" }
     ]
+  }
+  huggingface = {
+    script_path        = "workers/huggingface/dist/index.mjs"
+    compatibility_date = "2026-08-24"
   }
 }
 
